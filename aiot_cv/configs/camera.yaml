@@ -1,7 +1,26 @@
-# RealSense D435i sample intrinsics (for 640x480)
-fx: 615.0
-fy: 615.0
-cx: 320.0
-cy: 240.0
-# meters per depth unit (for 16-bit depth where value is in millimeters)
-depth_scale: 0.001
+version: 1
+device_serial: "d435i-sample"
+profile:
+  color: {width: 640, height: 480, fps: 30}
+  depth: {width: 640, height: 480, fps: 30}
+align_to_color: true
+
+intrinsics:
+  color:
+    fx: 615.0; fy: 615.0; cx: 320.0; cy: 240.0
+    dist_model: "brown"
+    dist: [0.0, 0.0, 0.0, 0.0, 0.0]
+  depth:
+    fx: 384.1; fy: 384.1; cx: 319.5; cy: 239.5
+    dist_model: "inverse_brown"
+    dist: [0.0, 0.0, 0.0, 0.0, 0.0]
+
+extrinsics:
+  T_color_from_depth:
+    - [1.0, 0.0, 0.0, 0.0]
+    - [0.0, 1.0, 0.0, 0.0]
+    - [0.0, 0.0, 1.0, 0.0]
+    - [0.0, 0.0, 0.0, 1.0]
+
+depth_units: 0.001
+notes: "D435i @ 640x480; sample schema"
