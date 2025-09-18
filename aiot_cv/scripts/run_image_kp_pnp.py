@@ -1,4 +1,4 @@
-import json, yaml, cv2, torch, numpy as np
+import json, yaml, cv2, torch, numpy as np, argparse, os
 from aiot_cv.src.io.load_k import load_K
 from aiot_cv.src.detect.yolo import YoloSeg
 from aiot_cv.src.detect.mask_ops import crop_square_roi
@@ -8,18 +8,30 @@ from aiot_cv.src.pose.pnp import solve_pnp
 from aiot_cv.src.pose.symmetry import symmetry_candidates
 
 if __name__ == '__main__':
+	ap = argparse.ArgumentParser()
+	ap.add_argument('--image', default='aiot_cv/data/images/sample.png')
+	ap.add_argument('--camera', default='aiot_cv/configs/camera.yaml')
+	ap.add_argument('--tool', default='aiot_cv/configs/tools/screwdriver.json')
+	ap.add_argument('--kp-weights', default=None)
+	args = ap.parse_args()
+
 	cfg = yaml.safe_load(open('aiot_cv/configs/train_kp.yaml'))
-	K, depth_scale, _ = load_K('tool_seg/data.yaml'.replace('data.yaml','camera.yaml')) if False else (np.array([[600,0,320],[0,600,240],[0,0,1]], float), 0.001, {})
-	tool = json.load(open('aiot_cv/configs/tools/screwdriver.json'))
+	K, depth_scale, _ = load_K(args.camera)
+	tool = json.load(open(args.tool))
 	order = tool['keypoints_order']; KPTS = len(order)
 
 	det = YoloSeg(weights=None, conf=0.5)
 	net = KPHead(3, KPTS, cfg['heatmap_size']).cuda()
-	# TODO: load weights
-	# net.load_state_dict(torch.load('weights/kp_head.pt'))
+	# auto-detect kp weights if not provided
+	cand = [args.kp_weights, 'weights/kp_head.pt', 'aiot_cv/weights/kp_head.pt']
+	for c in cand:
+		if c and os.path.exists(c):
+			net.load_state_dict(torch.load(c))
+			print(f"loaded KP weights: {c}")
+			break
 	net.eval()
 
-	rgb = cv2.imread('aiot_cv/data/images/sample.png')
+	rgb = cv2.imread(args.image)
 	objs = det(rgb); obj = max(objs, key=lambda o:o['score'])
 	roi, T_roi = crop_square_roi(rgb, obj['xyxy'], out_size=cfg['image_size'])
 

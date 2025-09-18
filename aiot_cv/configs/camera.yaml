@@ -1,0 +1,7 @@
+# RealSense D435i sample intrinsics (for 640x480)
+fx: 615.0
+fy: 615.0
+cx: 320.0
+cy: 240.0
+# meters per depth unit (for 16-bit depth where value is in millimeters)
+depth_scale: 0.001
