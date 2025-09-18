@@ -1,5 +1,0 @@
-fx: 600.0
-fy: 600.0
-cx: 320.0
-cy: 240.0
-depth_scale: 0.001  # meters per depth unit
