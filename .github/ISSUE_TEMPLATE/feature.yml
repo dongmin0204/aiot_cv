@@ -1,0 +1,24 @@
+name: Feature
+description: Feature / module task
+title: "[Feature] "
+labels: ["feature"]
+body:
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: "무엇을, 왜"
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      description: "포함/제외 범위"
+  - type: textarea
+    id: ac
+    attributes:
+      label: Acceptance Criteria
+      description: "체크리스트"
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes/Refs
