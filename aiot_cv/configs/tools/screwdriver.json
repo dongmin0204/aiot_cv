@@ -1,0 +1,11 @@
+{
+  "tool_id": "screwdriver",
+  "symmetry": "cyl_90",
+  "keypoints_3d": {
+    "tip":    [0.0, 0.0,  0.10],
+    "handle": [0.0, 0.0, -0.10],
+    "sideA":  [0.01, 0.0, 0.0],
+    "sideB":  [-0.01, 0.0, 0.0]
+  },
+  "keypoints_order": ["tip","handle","sideA","sideB"]
+}
