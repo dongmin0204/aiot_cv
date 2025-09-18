@@ -1,0 +1,13 @@
+train: /home/wt/Tool_Sample/tool_seg/train/images
+val: /home/wt/Tool_Sample/tool_seg/valid/images
+#test: ../test/images
+
+nc: 17
+names: ['-rescent wrench', 'Adjustable spanner', 'Crescent wrench', 'Cutting pliers', 'Drill', 'Electrical tape', 'Gas wrench', 'Hammer', 'Hand', 'Handsaw', 'Needle-nose pliers', 'Pliers', 'Ratchet', 'Screwdriver', 'Tape measure', 'Utility knife', 'Wrench']
+
+roboflow:
+  workspace: macaron
+  project: tools-segmentation-fe9dd
+  version: 1
+  license: CC BY 4.0
+  url: https://universe.roboflow.com/macaron/tools-segmentation-fe9dd/dataset/1
