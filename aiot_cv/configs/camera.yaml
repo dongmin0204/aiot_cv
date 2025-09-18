@@ -1,20 +1,31 @@
+# Camera configuration (extended schema)
+# - Separate color/depth intrinsics, alignment flag, and extrinsics
+# - Safe to modify resolution/profiles later without code changes
 version: 1
+
+# (Optional) Manage by device serial when multiple cameras are used
 device_serial: "d435i-sample"
+
+# Active stream profiles
 profile:
-  color: {width: 640, height: 480, fps: 30}
-  depth: {width: 640, height: 480, fps: 30}
+  color: {width: 640, height: 480, fps: 30}   # RGB stream resolution
+  depth: {width: 640, height: 480, fps: 30}   # Depth stream resolution
+
+# If true: depth is aligned (resampled) to color frame. Use color K for projection.
 align_to_color: true
 
+# Per-stream intrinsics at the above profile resolutions
 intrinsics:
   color:
-    fx: 615.0; fy: 615.0; cx: 320.0; cy: 240.0
-    dist_model: "brown"
-    dist: [0.0, 0.0, 0.0, 0.0, 0.0]
+    fx: 615.0; fy: 615.0; cx: 320.0; cy: 240.0   # Focal/Principal at color resolution (pixels)
+    dist_model: "brown"                           # Distortion model: brown | inverse_brown | none
+    dist: [0.0, 0.0, 0.0, 0.0, 0.0]               # k1,k2,p1,p2,k3 (if using raw frames for PnP)
   depth:
-    fx: 384.1; fy: 384.1; cx: 319.5; cy: 239.5
+    fx: 384.1; fy: 384.1; cx: 319.5; cy: 239.5   # At depth resolution
     dist_model: "inverse_brown"
     dist: [0.0, 0.0, 0.0, 0.0, 0.0]
 
+# Extrinsics from depth to color (4x4, row-major). Identity here as placeholder.
 extrinsics:
   T_color_from_depth:
     - [1.0, 0.0, 0.0, 0.0]
@@ -22,5 +33,8 @@ extrinsics:
     - [0.0, 0.0, 1.0, 0.0]
     - [0.0, 0.0, 0.0, 1.0]
 
+# Depth scale: meters per depth unit (e.g., 0.001 for mm)
 depth_units: 0.001
+
+# Free-form notes (profile date, calibration method, etc.)
 notes: "D435i @ 640x480; sample schema"
