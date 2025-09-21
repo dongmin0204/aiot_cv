@@ -187,14 +187,16 @@ class FoundationPosePipeline:
             print("Tracking pose...")
             pose = self.fp_wrapper.track(roi_rgb, roi_depth, mask)
         
-        if pose is None:
-            print("FoundationPose estimation failed")
-            return None
+        # Validate pose
+        if pose is None or not np.all(np.isfinite(pose)):
+            print("FoundationPose estimation failed or invalid pose")
+            return self.current_pose  # Return previous pose if available
         
         # Step 4: Apply smoothing
         smoothed_pose = self.smoother.update(pose, frame_start_time)
         
-        if smoothed_pose is not None:
+        # Validate smoothed pose
+        if smoothed_pose is not None and np.all(np.isfinite(smoothed_pose)):
             self.current_pose = smoothed_pose
             
             # Log pose
@@ -211,11 +213,13 @@ class FoundationPosePipeline:
                 fps = self.frame_count / (frame_start_time - self.start_time)
                 self.fps_history.append(fps)
                 print(f"FPS: {fps:.2f}")
+        else:
+            print("Smoothed pose is invalid, keeping previous pose")
         
         # Update frame count
         self.frame_count += 1
         
-        return smoothed_pose
+        return self.current_pose
     
     def process_video(self, video_path: str, output_path: Optional[str] = None):
         """
@@ -407,38 +411,73 @@ class FoundationPosePipeline:
     
     def _draw_pose_axes(self, image: np.ndarray, pose: np.ndarray, 
                        length: float = 0.1) -> np.ndarray:
-        """Draw pose coordinate axes on image."""
-        # Extract rotation and translation
-        R = pose[:3, :3]
-        t = pose[:3, 3]
-        
-        # Define axis endpoints in 3D
+        """
+        Draw pose axes safely. Guards against z<=0/NaN and wrong pose convention.
+        """
+        K = self.K
+        R = pose[:3, :3].copy()
+        t = pose[:3, 3].copy()
+
+        # Dynamic length based on distance from camera (10% of distance)
+        dyn_len = float(max(0.05, min(0.2, t[2] * 0.1))) if np.isfinite(t[2]) else length
+
+        # Axis endpoints in object frame
         axes_3d = np.array([
-            [0, 0, 0],           # origin
-            [length, 0, 0],      # x-axis (red)
-            [0, length, 0],      # y-axis (green)
-            [0, 0, length]       # z-axis (blue)
-        ]).T
-        
-        # Project to 2D
-        axes_2d = self.K @ (R @ axes_3d + t[:, np.newaxis])
-        axes_2d = axes_2d[:2] / axes_2d[2]
-        
-        # Draw axes
-        origin = tuple(axes_2d[:, 0].astype(int))
-        
-        # X-axis (red)
-        x_end = tuple(axes_2d[:, 1].astype(int))
-        cv2.arrowedLine(image, origin, x_end, (0, 0, 255), 3)
-        
-        # Y-axis (green)
-        y_end = tuple(axes_2d[:, 2].astype(int))
-        cv2.arrowedLine(image, origin, y_end, (0, 255, 0), 3)
-        
-        # Z-axis (blue)
-        z_end = tuple(axes_2d[:, 3].astype(int))
-        cv2.arrowedLine(image, origin, z_end, (255, 0, 0), 3)
-        
+            [0, 0, 0],            # origin
+            [dyn_len, 0, 0],       # x
+            [0, dyn_len, 0],       # y
+            [0, 0, dyn_len],       # z
+        ], dtype=np.float64).T  # (3,4)
+
+        def project(R_, t_):
+            # camera-frame points
+            cam = (R_ @ axes_3d) + t_[:, None]  # (3,4)
+            z = cam[2]
+            return cam, z
+
+        cam, z = project(R, t)
+
+        # If any point has z<=eps, try inverting pose once (in case pose convention is reversed)
+        if np.any(~np.isfinite(z)) or np.any(z <= 1e-6):
+            Pinv = np.linalg.inv(pose)
+            R = Pinv[:3, :3]
+            t = Pinv[:3, 3]
+            cam, z = project(R, t)
+
+        # If still invalid, skip drawing
+        if np.any(~np.isfinite(z)) or np.any(z <= 1e-6):
+            return image
+
+        # Use OpenCV projectPoints for robust projection/type handling
+        rvec, _ = cv2.Rodrigues(R)
+        obj_pts = np.array([
+            [0, 0, 0],
+            [dyn_len, 0, 0],
+            [0, dyn_len, 0],
+            [0, 0, dyn_len],
+        ], dtype=np.float64)
+        dist = np.zeros(5)  # assume no distortion
+        img_pts, _ = cv2.projectPoints(obj_pts, rvec, t, K, dist)  # (4,1,2)
+        pts = img_pts.reshape(-1, 2)
+
+        # Validate finite + in-bounds-ish
+        if not np.all(np.isfinite(pts)):
+            return image
+
+        origin = tuple(np.round(pts[0]).astype(int))
+        x_end  = tuple(np.round(pts[1]).astype(int))
+        y_end  = tuple(np.round(pts[2]).astype(int))
+        z_end  = tuple(np.round(pts[3]).astype(int))
+
+        # Optional: reject absurdly off-screen points to avoid OpenCV issues
+        H, W = image.shape[:2]
+        def on_screen(p): return -W <= p[0] <= 2*W and -H <= p[1] <= 2*H
+        if not (on_screen(origin) and on_screen(x_end) and on_screen(y_end) and on_screen(z_end)):
+            return image
+
+        cv2.arrowedLine(image, origin, x_end, (0, 0, 255), 3)  # X (red)
+        cv2.arrowedLine(image, origin, y_end, (0, 255, 0), 3)  # Y (green)
+        cv2.arrowedLine(image, origin, z_end, (255, 0, 0), 3)  # Z (blue)
         return image
     
     def _save_results(self, output_path: Optional[str] = None):

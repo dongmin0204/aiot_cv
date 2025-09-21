@@ -140,6 +140,10 @@ class RealtimePCASmoother:
         if pose is None or pose.shape != (4, 4):
             return False
         
+        # Check for NaN or Inf first
+        if np.any(np.isnan(pose)) or np.any(np.isinf(pose)):
+            return False
+        
         # Check if rotation matrix is valid (orthogonal, det=1)
         R = pose[:3, :3]
         if not np.allclose(R @ R.T, np.eye(3), atol=1e-3):
@@ -147,8 +151,14 @@ class RealtimePCASmoother:
         if abs(np.linalg.det(R) - 1.0) > 1e-3:
             return False
         
-        # Check for NaN or Inf
-        if np.any(np.isnan(pose)) or np.any(np.isinf(pose)):
+        # Check translation is reasonable (not too far from camera)
+        t = pose[:3, 3]
+        distance = np.linalg.norm(t)
+        if distance > 10.0 or distance < 0.01:  # 1cm to 10m range
+            return False
+        
+        # Check bottom row is [0, 0, 0, 1]
+        if not np.allclose(pose[3, :], [0, 0, 0, 1], atol=1e-6):
             return False
         
         return True
