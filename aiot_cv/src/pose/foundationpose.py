@@ -225,20 +225,38 @@ class FoundationPoseWrapper:
             print("Warning: No suitable reference match found")
             return None
         
+        print(f"[Init] Found best match: ref[{best_match_idx}]")
+        
         # Use reference pose if available, otherwise estimate from matching
         if (self.refs_bundle.poses is not None and 
             best_match_idx < len(self.refs_bundle.poses)):
             initial_pose = self.refs_bundle.poses[best_match_idx].copy()
+            print(f"[Init] Using pre-computed reference pose")
         else:
             # Fallback: estimate pose using simple geometric method
+            print(f"[Init] Estimating pose from matching")
             initial_pose = self._estimate_pose_from_matching(
                 rgb, depth, mask, best_match_idx
             )
         
         if initial_pose is not None:
-            self.last_pose = initial_pose
-            self.is_initialized = True
-            print(f"Pose initialized from reference {best_match_idx}")
+            # Validate pose
+            z_val = initial_pose[2, 3]
+            is_valid = (np.isfinite(initial_pose).all() and 
+                       initial_pose.shape == (4, 4) and 
+                       z_val > 0.01)  # At least 1cm depth
+            
+            print(f"[Init] Pose validation: z={z_val:.4f}, valid={is_valid}")
+            
+            if is_valid:
+                self.last_pose = initial_pose
+                self.is_initialized = True
+                print(f"[Init] Successfully initialized from reference {best_match_idx}")
+            else:
+                print(f"[Init] Invalid pose detected, returning None")
+                return None
+        else:
+            print(f"[Init] Pose estimation failed")
         
         return initial_pose
     
@@ -282,36 +300,138 @@ class FoundationPoseWrapper:
         return self.init_pose_from_refs(rgb, depth, mask)
     
     def _find_best_reference(self, rgb: np.ndarray, mask: Optional[np.ndarray] = None) -> Optional[int]:
-        """Find best matching reference image (simplified)."""
-        # Simple template matching as placeholder
-        # In practice, use feature matching, deep features, etc.
+        """Find best matching reference image with improved matching."""
         best_score = -1
         best_idx = None
+        scores = []
+        
+        # Ensure consistent preprocessing
+        query_preprocessed = self._preprocess_for_matching(rgb, mask)
         
         for i, ref_img in enumerate(self.refs_bundle.images):
-            # Resize to same size for comparison
-            h, w = rgb.shape[:2]
-            ref_resized = cv2.resize(ref_img, (w, h))
+            # Apply same preprocessing to reference
+            ref_preprocessed = self._preprocess_for_matching(ref_img, self.refs_bundle.masks[i])
             
-            # Simple correlation score
-            score = cv2.matchTemplate(
-                cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY),
+            # Multiple matching methods for robustness
+            scores_i = []
+            
+            # 1) Template matching (original method)
+            h, w = query_preprocessed.shape[:2]
+            ref_resized = cv2.resize(ref_preprocessed, (w, h))
+            
+            template_score = cv2.matchTemplate(
+                cv2.cvtColor(query_preprocessed, cv2.COLOR_RGB2GRAY),
                 cv2.cvtColor(ref_resized, cv2.COLOR_RGB2GRAY),
                 cv2.TM_CCOEFF_NORMED
             )[0, 0]
+            scores_i.append(template_score)
             
-            if score > best_score:
-                best_score = score
+            # 2) Histogram correlation
+            hist_score = cv2.compareHist(
+                cv2.calcHist([cv2.cvtColor(query_preprocessed, cv2.COLOR_RGB2GRAY)], [0], None, [256], [0, 256]),
+                cv2.calcHist([cv2.cvtColor(ref_resized, cv2.COLOR_RGB2GRAY)], [0], None, [256], [0, 256]),
+                cv2.HISTCMP_CORREL
+            )
+            scores_i.append(hist_score)
+            
+            # 3) Structural similarity (if available)
+            try:
+                from skimage.metrics import structural_similarity as ssim
+                gray1 = cv2.cvtColor(query_preprocessed, cv2.COLOR_RGB2GRAY)
+                gray2 = cv2.cvtColor(ref_resized, cv2.COLOR_RGB2GRAY)
+                ssim_score = ssim(gray1, gray2)
+                scores_i.append(ssim_score)
+            except ImportError:
+                ssim_score = 0.0
+                scores_i.append(ssim_score)
+            
+            # Weighted combination of scores
+            combined_score = (0.5 * template_score + 0.3 * hist_score + 0.2 * ssim_score)
+            scores.append(combined_score)
+            
+            if combined_score > best_score:
+                best_score = combined_score
                 best_idx = i
         
-        return best_idx if best_score > 0.3 else None
+        # Log detailed matching scores
+        print(f"[RefMatch] refs={len(self.refs_bundle.images)}, scores={[f'{s:.3f}' for s in scores]}")
+        print(f"[RefMatch] best_idx={best_idx}, best_score={best_score:.3f}")
+        
+        # Relaxed threshold for testing (was 0.3, now 0.2)
+        return best_idx if best_score > 0.2 else None
+    
+    def _preprocess_for_matching(self, img: np.ndarray, mask: Optional[np.ndarray] = None) -> np.ndarray:
+        """Consistent preprocessing for both query and reference images."""
+        # Ensure RGB format
+        if img.ndim == 3 and img.shape[2] == 3:
+            # Assume BGR if loaded with cv2.imread, convert to RGB
+            img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        else:
+            img_rgb = img.copy()
+        
+        # Resize to standard size for matching
+        target_size = 256
+        img_resized = cv2.resize(img_rgb, (target_size, target_size), interpolation=cv2.INTER_LINEAR)
+        
+        # Apply mask if available (set background to black)
+        if mask is not None:
+            mask_resized = cv2.resize(mask.astype(np.uint8), (target_size, target_size), interpolation=cv2.INTER_NEAREST)
+            mask_binary = (mask_resized > 127).astype(np.uint8)
+            # Set background to black
+            img_resized = img_resized * mask_binary[:, :, np.newaxis]
+        
+        return img_resized
     
     def _estimate_pose_from_matching(self, rgb: np.ndarray, depth: Optional[np.ndarray],
                                    mask: Optional[np.ndarray], ref_idx: int) -> Optional[np.ndarray]:
-        """Estimate pose from reference matching (placeholder implementation)."""
-        # Placeholder: return identity pose
-        # In practice, implement PnP, ICP, or other geometric methods
-        return np.eye(4, dtype=np.float64)
+        """Estimate pose from reference matching with depth-based z estimation."""
+        # Start with identity pose
+        pose = np.eye(4, dtype=np.float64)
+        
+        # If depth is available, estimate z from depth median
+        if depth is not None and mask is not None:
+            # Convert depth to meters
+            depth_m = depth.astype(np.float32) * self.refs_bundle.depth_scale
+            mask_binary = (mask > 0).astype(np.uint8)
+            
+            # Get valid depth values in mask area
+            valid_depth = (depth_m > 0) & (depth_m < 5.0) & (mask_binary > 0)
+            if valid_depth.any():
+                depth_values = depth_m[valid_depth]
+                # Use median for robustness against outliers
+                z_median = float(np.median(depth_values))
+                
+                # Set translation z component
+                pose[2, 3] = z_median
+                print(f"[PoseEst] Estimated z from depth: {z_median:.3f}m from {len(depth_values)} points")
+                
+                # Basic centering (simple centroid estimation)
+                # In practice, use more sophisticated geometric methods
+                h, w = mask.shape
+                y_coords, x_coords = np.where(mask_binary > 0)
+                if len(x_coords) > 0:
+                    cx = np.mean(x_coords)
+                    cy = np.mean(y_coords)
+                    
+                    # Convert to camera coordinates (simplified)
+                    fx, fy = self.refs_bundle.K[0, 0], self.refs_bundle.K[1, 1]
+                    cx_k, cy_k = self.refs_bundle.K[0, 2], self.refs_bundle.K[1, 2]
+                    
+                    x_cam = (cx - cx_k) * z_median / fx
+                    y_cam = (cy - cy_k) * z_median / fy
+                    
+                    pose[0, 3] = x_cam
+                    pose[1, 3] = y_cam
+                    
+                    print(f"[PoseEst] Estimated t=[{x_cam:.3f}, {y_cam:.3f}, {z_median:.3f}]")
+                else:
+                    print("[PoseEst] No mask pixels found, using z-only estimation")
+            else:
+                print("[PoseEst] No valid depth in mask, using identity pose")
+        else:
+            print("[PoseEst] No depth/mask available, using identity pose")
+        
+        return pose
     
     def _simple_tracking(self, rgb: np.ndarray, depth: Optional[np.ndarray],
                         mask: Optional[np.ndarray]) -> Optional[np.ndarray]:

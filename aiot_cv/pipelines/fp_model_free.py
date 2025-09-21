@@ -355,11 +355,13 @@ class FoundationPosePipeline:
             if pose is None:
                 logging.warning("[Init] ref match failed -> trying fallback (PCL)")
             else:
-                ok = np.isfinite(pose).all() and pose.shape == (4,4) and pose[2,3] > 0
+                ok = np.isfinite(pose).all() and pose.shape == (4,4) and pose[2,3] > 0.01
                 logging.info(f"[Init] ref match pose z={pose[2,3]:.4f} valid={ok}")
                 if not ok:
                     logging.warning("[Init] Invalid pose detected, falling back to PCL")
                     pose = None
+                else:
+                    logging.info("[Init] Reference initialization successful!")
             
             # Set cooldown if initialization failed
             if pose is None:
