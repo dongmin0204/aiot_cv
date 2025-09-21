@@ -261,10 +261,40 @@ class FoundationPosePipeline:
         if mask is not None and mask.shape != (target_size, target_size):
             mask = cv2.resize(mask.astype(np.uint8), (target_size, target_size), interpolation=cv2.INTER_NEAREST).astype(bool)
         
+        # Dilate mask to reduce depth holes in thin objects (screwdrivers)
+        if mask is not None:
+            kernel = np.ones((3, 3), np.uint8)
+            mask_dilated = cv2.dilate(mask.astype(np.uint8), kernel, iterations=2)
+            mask = mask_dilated.astype(bool)
+            logging.debug("[Mask] Applied 2-pixel dilation to reduce depth holes")
+        
         # Ensure all arrays have consistent shapes
         if roi_depth is not None and mask is not None:
             if roi_depth.shape[:2] != mask.shape[:2]:
                 mask = cv2.resize(mask.astype(np.uint8), roi_depth.shape[:2], interpolation=cv2.INTER_NEAREST).astype(bool)
+        
+        # DEBUG: Check depth alignment and valid depth ratio
+        if roi_depth is not None and mask is not None:
+            # Convert depth to meters
+            depth_m = roi_depth.astype(np.float32) * self.depth_scale
+            mask_binary = (mask > 0).astype(np.uint8)
+            
+            # Check valid depth in mask area
+            valid_depth = (depth_m > 0) & (depth_m < 5.0)  # 5m upper limit
+            valid_in_mask = valid_depth & (mask_binary > 0)
+            
+            total_mask_pixels = int((mask_binary > 0).sum())
+            valid_depth_pixels = int(valid_in_mask.sum())
+            ratio = valid_depth_pixels / total_mask_pixels if total_mask_pixels > 0 else 0.0
+            median_z = float(np.median(depth_m[valid_in_mask])) if valid_depth_pixels > 0 else 0.0
+            
+            logging.info(f"[DepthDBG] mask_pixels={total_mask_pixels}, valid_in_mask={valid_depth_pixels} ({ratio:.2%}), median_z={median_z:.3f}m")
+            
+            # Check color/depth alignment
+            if roi_rgb.shape[:2] != roi_depth.shape[:2]:
+                logging.warning(f"[DepthDBG] Shape mismatch: RGB{roi_rgb.shape[:2]} vs Depth{roi_depth.shape[:2]}")
+            else:
+                logging.debug(f"[DepthDBG] RGB/Depth alignment OK: {roi_rgb.shape[:2]}")
         
         # Step 4: FoundationPose estimation
         if self.current_pose is None:
@@ -283,6 +313,26 @@ class FoundationPosePipeline:
             # Initialize pose from reference images
             logging.info("Initializing pose from references...")
             
+            # Check depth validity before attempting reference initialization
+            depth_valid = True
+            if roi_depth is not None and mask is not None:
+                depth_m = roi_depth.astype(np.float32) * self.depth_scale
+                mask_binary = (mask > 0).astype(np.uint8)
+                valid_depth = (depth_m > 0) & (depth_m < 5.0)
+                valid_in_mask = valid_depth & (mask_binary > 0)
+                
+                total_mask_pixels = int((mask_binary > 0).sum())
+                valid_depth_pixels = int(valid_in_mask.sum())
+                ratio = valid_depth_pixels / total_mask_pixels if total_mask_pixels > 0 else 0.0
+                median_z = float(np.median(depth_m[valid_in_mask])) if valid_depth_pixels > 0 else 0.0
+                
+                # Minimum requirements for reference initialization
+                depth_valid = (ratio >= 0.25 and 0.05 < median_z < 3.0)
+                logging.info(f"[Init] Depth check: ratio={ratio:.2%}, median_z={median_z:.3f}m, valid={depth_valid}")
+                
+                if not depth_valid:
+                    logging.warning("[Init] Insufficient valid depth, skipping reference initialization")
+            
             # Debug: Save ROI and mask for analysis
             dbg_dir = Path("debug_roi")
             dbg_dir.mkdir(exist_ok=True)
@@ -295,7 +345,11 @@ class FoundationPosePipeline:
                            (mask.astype(np.uint8) * 255))
             logging.debug(f"[Debug] Saved ROI to {dbg_dir}")
             
-            pose = self.fp_wrapper.init_pose_from_refs(roi_rgb, roi_depth, mask)
+            pose = None
+            if depth_valid:
+                pose = self.fp_wrapper.init_pose_from_refs(roi_rgb, roi_depth, mask)
+            else:
+                logging.info("[Init] Skipping reference initialization due to poor depth quality")
             
             # Check initialization result
             if pose is None:
@@ -528,6 +582,19 @@ class FoundationPosePipeline:
             
             print(f"RealSense intrinsics: fx={color_intrinsics.fx:.1f}, fy={color_intrinsics.fy:.1f}")
             print(f"Depth scale: {self.depth_scale}")
+            print(f"Color resolution: {color_intrinsics.width}x{color_intrinsics.height}")
+            
+            # Verify K matrix resolution matches actual stream resolution
+            if color_intrinsics.width != 640 or color_intrinsics.height != 480:
+                logging.warning(f"[K-Matrix] Resolution mismatch: K calibrated for {color_intrinsics.width}x{color_intrinsics.height} but stream is 640x480")
+                # Scale K matrix to match stream resolution
+                scale_x = 640.0 / color_intrinsics.width
+                scale_y = 480.0 / color_intrinsics.height
+                self.K[0, 0] *= scale_x  # fx
+                self.K[1, 1] *= scale_y  # fy
+                self.K[0, 2] *= scale_x  # cx
+                self.K[1, 2] *= scale_y  # cy
+                logging.info(f"[K-Matrix] Scaled K matrix for 640x480 stream")
             
         except Exception as e:
             print(f"Failed to start RealSense camera: {e}")
@@ -548,8 +615,10 @@ class FoundationPosePipeline:
         decimation = rs.decimation_filter(2)  # Reduce resolution, reduce noise
         spatial = rs.spatial_filter()         # Spatial filtering
         temporal = rs.temporal_filter()       # Temporal filtering
-        hole_fill = rs.hole_filling_filter(1) # Fill holes
+        hole_fill = rs.hole_filling_filter(2) # Fill holes with FILL_FROM_NEAREST
         # Note: threshold filter will be applied manually in numpy
+        
+        print("[Depth] Applied filters: decimation, spatial, temporal, hole_filling")
         
         frame_count = 0
         
@@ -580,8 +649,15 @@ class FoundationPosePipeline:
                 
                 # Apply manual depth threshold filter (0.15m to 1.2m)
                 depth_meters = depth_image.astype(np.float32) * self.depth_scale
-                depth_image = np.where((depth_meters >= 0.15) & (depth_meters <= 1.2), 
-                                     depth_image, 0)
+                valid_depth_mask = (depth_meters >= 0.15) & (depth_meters <= 1.2)
+                depth_image = np.where(valid_depth_mask, depth_image, 0)
+                
+                # Log depth statistics
+                total_pixels = depth_image.size
+                valid_pixels = int(valid_depth_mask.sum())
+                valid_ratio = valid_pixels / total_pixels if total_pixels > 0 else 0.0
+                if frame_count % 30 == 0:  # Log every 30 frames to avoid spam
+                    logging.info(f"[Depth] Valid depth pixels: {valid_pixels}/{total_pixels} ({valid_ratio:.2%})")
                 
                 # Process frame through pipeline
                 pose = self.process_frame(color_image, depth_image)
