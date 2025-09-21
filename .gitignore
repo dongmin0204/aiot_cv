@@ -36,8 +36,6 @@ runs/
 **/runs/
 
 # Training results (keep configs/CSV but ignore heavy media and weights)
-train_results/**/weights/
-train_results/**/*.pt
 train_results/**/*.onnx
 train_results/**/*.engine
 train_results/**/*.tflite
@@ -59,13 +57,7 @@ tool_seg/valid/labels/
 tool_seg/**/labels.cache
 
 # Pretrained and exported weights
-*.pt
-*.pth
-*.onnx
-*.tflite
-*.engine
-*.trt
-*.bin
+
 
 # Checkpoints
 checkpoints/
