@@ -37,7 +37,7 @@ def generate_yolo_references():
     
     # Get reference images (ref_01.png ~ ref_44.png)
     ref_images = []
-    for i in range(1, 45):  # ref_01.png to ref_44.png
+    for i in range(1, 117):  # ref_01.png to ref_44.png
         ref_images.append(f"ref_{i:02d}.png")
     
     print(f"Processing {len(ref_images)} reference images")
