@@ -11,6 +11,26 @@ foundationpose:
   enable_ref_matching: false  # Disable expensive reference matching
   cuda_memory_fraction: 0.8  # GPU memory allocation
   batch_size: 1  # Batch processing for GPU efficiency
+  
+  # Quality gates (higher safety margins)
+  warmup_frames: 20  # Skip first N frames for sensor warmup
+  
+  # Initialization gates (strict)
+  init_gates:
+    min_conf: 0.85
+    min_mask_area: 0.08  # 8% of frame
+    min_depth_valid_ratio: 0.90  # 90% valid depth in mask
+    min_global_depth_ratio: 0.90  # 90% global depth validity
+  
+  # Tracking gates (relaxed)
+  track_gates:
+    min_conf: 0.75
+    min_mask_area: 0.05  # 5% of frame
+    min_depth_valid_ratio: 0.80  # 80% valid depth in mask
+    reinit_failure_frames: 5  # Reinit after N consecutive failures
+  
+  # Z stabilization
+  z_ema_alpha: 0.2  # EMA smoothing factor
 
 smoothing:
   window_size: 5

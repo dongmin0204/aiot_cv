@@ -18,6 +18,7 @@ from datetime import datetime
 # Import our modules
 from aiot_cv.src.detect.yolo import YoloSeg, Detection
 from aiot_cv.src.pose.foundationpose import FoundationPoseWrapper
+from aiot_cv.src.utils.visualization_3d import Pose3DVisualizer
 from aiot_cv.src.track.smoother import RealtimePCASmoother, PoseFilterConfig
 from aiot_cv.src.pc.pointcloud import rgbd_to_pcl, filter_pointcloud
 from aiot_cv.src.io.load_k import load_K
@@ -318,39 +319,88 @@ class FoundationPosePipeline:
             # Initialize pose from reference images
             logging.info("Initializing pose from references...")
             
-            # Quality gating: Check depth and mask quality before attempting initialization
-            depth_valid = True
-            mask_valid = True
+        # Warmup check: Skip first N frames for sensor stabilization
+        if self.frame_count < self.warmup_frames:
+            logging.info(f"[Warmup] Skipping frame {self.frame_count+1}/{self.warmup_frames}")
+            return None
+        
+        # Enhanced quality gating with configurable thresholds
+        depth_valid = True
+        mask_valid = True
+        global_depth_valid = True
+        
+        if roi_depth is not None and mask is not None:
+            depth_m = roi_depth.astype(np.float32) * self.depth_scale
+            mask_binary = (mask > 0).astype(np.uint8)
+            valid_depth = (depth_m > 0) & (depth_m < 5.0)
+            valid_in_mask = valid_depth & (mask_binary > 0)
             
-            if roi_depth is not None and mask is not None:
-                depth_m = roi_depth.astype(np.float32) * self.depth_scale
-                mask_binary = (mask > 0).astype(np.uint8)
-                valid_depth = (depth_m > 0) & (depth_m < 5.0)
-                valid_in_mask = valid_depth & (mask_binary > 0)
+            total_mask_pixels = int((mask_binary > 0).sum())
+            valid_depth_pixels = int(valid_in_mask.sum())
+            total_frame_pixels = roi_depth.size
+            global_valid_pixels = int(valid_depth.sum())
+            
+            # Quality metrics
+            depth_ratio = valid_depth_pixels / total_mask_pixels if total_mask_pixels > 0 else 0.0
+            mask_area_ratio = total_mask_pixels / total_frame_pixels
+            global_depth_ratio = global_valid_pixels / total_frame_pixels
+            median_z = float(np.median(depth_m[valid_in_mask])) if valid_depth_pixels > 0 else 0.0
+            
+            # Determine if we're initializing or tracking
+            is_initializing = not self.fp_wrapper.is_initialized
+            gates = self.init_gates if is_initializing else self.track_gates
+            
+            # Apply appropriate thresholds
+            min_conf = gates.get('min_conf', 0.85 if is_initializing else 0.75)
+            min_mask_ratio = gates.get('min_mask_area', 0.08 if is_initializing else 0.05)
+            min_depth_ratio = gates.get('min_depth_valid_ratio', 0.90 if is_initializing else 0.80)
+            min_global_depth = gates.get('min_global_depth_ratio', 0.90 if is_initializing else 0.0)
+            
+            # Confidence check
+            conf_valid = detection.confidence >= min_conf
+            
+            # Quality checks
+            mask_valid = mask_area_ratio >= min_mask_ratio
+            depth_valid = (depth_ratio >= min_depth_ratio and 0.05 < median_z < 3.0)
+            global_depth_valid = global_depth_ratio >= min_global_depth
+            
+            # Z-axis EMA stabilization
+            if self.z_ema is None:
+                self.z_ema = median_z
+            else:
+                self.z_ema = self.z_ema_alpha * median_z + (1 - self.z_ema_alpha) * self.z_ema
+            
+            gate_status = "INIT" if is_initializing else "TRACK"
+            logging.info(f"[{gate_status}Gate] conf={detection.confidence:.2f} (>={min_conf:.2f}), "
+                        f"mask_area={mask_area_ratio:.1%} (>={min_mask_ratio:.1%}), "
+                        f"depth_ratio={depth_ratio:.1%} (>={min_depth_ratio:.1%}), "
+                        f"global_depth={global_depth_ratio:.1%} (>={min_global_depth:.1%})")
+            logging.info(f"[{gate_status}Gate] median_z={median_z:.3f}m, z_ema={self.z_ema:.3f}m")
+            
+            # Overall validity
+            overall_valid = conf_valid and mask_valid and depth_valid and global_depth_valid
+            
+            if not overall_valid:
+                failure_reasons = []
+                if not conf_valid: failure_reasons.append(f"conf={detection.confidence:.2f}<{min_conf:.2f}")
+                if not mask_valid: failure_reasons.append(f"mask_area={mask_area_ratio:.1%}<{min_mask_ratio:.1%}")
+                if not depth_valid: failure_reasons.append(f"depth_ratio={depth_ratio:.1%}<{min_depth_ratio:.1%}")
+                if not global_depth_valid: failure_reasons.append(f"global_depth={global_depth_ratio:.1%}<{min_global_depth:.1%}")
                 
-                total_mask_pixels = int((mask_binary > 0).sum())
-                valid_depth_pixels = int(valid_in_mask.sum())
-                total_frame_pixels = roi_depth.size
+                logging.warning(f"[{gate_status}Gate] FAILED: {'; '.join(failure_reasons)}")
                 
-                # Quality metrics
-                depth_ratio = valid_depth_pixels / total_mask_pixels if total_mask_pixels > 0 else 0.0
-                mask_area_ratio = total_mask_pixels / total_frame_pixels
-                median_z = float(np.median(depth_m[valid_in_mask])) if valid_depth_pixels > 0 else 0.0
+                # Track consecutive failures for reinitialization
+                self.failure_count += 1
+                reinit_threshold = self.track_gates.get('reinit_failure_frames', 5)
                 
-                # Quality gating thresholds
-                min_mask_ratio = 0.025    # At least 2.5% of frame
-                min_depth_ratio = 0.35    # At least 35% valid depth in mask
+                if not is_initializing and self.failure_count >= reinit_threshold:
+                    logging.warning(f"[QualityGate] {self.failure_count} consecutive failures, forcing reinitialization")
+                    self.fp_wrapper.is_initialized = False
+                    self.failure_count = 0
                 
-                mask_valid = mask_area_ratio >= min_mask_ratio
-                depth_valid = (depth_ratio >= min_depth_ratio and 0.05 < median_z < 3.0)
-                
-                logging.info(f"[QualityGate] mask_area={mask_area_ratio:.1%}, depth_ratio={depth_ratio:.1%}, median_z={median_z:.3f}m")
-                logging.info(f"[QualityGate] mask_valid={mask_valid}, depth_valid={depth_valid}")
-                
-                if not mask_valid:
-                    logging.warning("[QualityGate] Mask too small, skipping reference initialization")
-                if not depth_valid:
-                    logging.warning("[QualityGate] Insufficient valid depth, skipping reference initialization")
+                return None
+            else:
+                self.failure_count = 0  # Reset failure count on success
             
             # Debug: Save ROI and mask for analysis
             dbg_dir = Path("debug_roi")
@@ -364,11 +414,11 @@ class FoundationPosePipeline:
                            (mask.astype(np.uint8) * 255))
             logging.debug(f"[Debug] Saved ROI to {dbg_dir}")
             
-            pose = None
-            if mask_valid and depth_valid:
-                pose = self.fp_wrapper.init_pose_from_refs(roi_rgb, roi_depth, mask)
-            else:
-                logging.info("[Init] Skipping reference initialization due to poor quality (mask or depth)")
+        pose = None
+        if overall_valid:
+            pose = self.fp_wrapper.init_pose_from_refs(roi_rgb, roi_depth, mask)
+        else:
+            logging.info("[Init] Skipping initialization due to quality gate failure")
             
             # Check initialization result
             if pose is None:
@@ -611,35 +661,71 @@ class FoundationPosePipeline:
                 # Process frame through pipeline
                 pose = self.process_frame(color_image, depth_image)
                 
-                # Draw visualization with detailed status
-                if pose is not None:
-                    color_image = self._draw_pose_axes(color_image, pose)
-                    # Draw status text
-                    cv2.putText(color_image, f"Frame: {frame_count}", (10, 30), 
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                    cv2.putText(color_image, "POSE OK", (10, 60), 
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                    
-                    # Add pose info
-                    t = pose[:3, 3]
-                    cv2.putText(color_image, f"Z: {t[2]:.2f}m", (10, 90), 
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-                else:
-                    # Determine failure reason for better debugging
-                    reason = "UNKNOWN"
-                    if not hasattr(self, 'last_detection') or self.last_detection is None:
-                        reason = "NO_DETECTION"
-                    elif not mask_valid:
-                        reason = "MASK_TOO_SMALL"
-                    elif not depth_valid:
-                        reason = "POOR_DEPTH"
-                    else:
-                        reason = "REF_MATCH_FAIL"
-                    
-                    cv2.putText(color_image, f"Frame: {frame_count}", (10, 30), 
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-                    cv2.putText(color_image, f"NO POSE [{reason}]", (10, 60), 
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+        # Draw visualization with detailed status and 3D overlay
+        if pose is not None:
+            # 2D pose axes overlay
+            color_image = self._draw_pose_axes(color_image, pose)
+            
+            # Enhanced 3D visualization overlay
+            color_image = self.viz_3d.draw_pose_on_image(color_image, pose, self.K, axis_length=0.1)
+            
+            # Update 3D visualizer if available
+            if hasattr(self, 'viz_3d') and self.viz_3d.enable_o3d:
+                # Create point cloud for 3D visualization
+                try:
+                    if roi_depth is not None and mask is not None:
+                        depth_m = roi_depth.astype(np.float32) * self.depth_scale
+                        mask_binary = (mask > 0).astype(np.uint8)
+                        
+                        # Backproject to point cloud
+                        ys, xs = np.where(mask_binary > 0)
+                        z = depth_m[ys, xs]
+                        valid = (z > 0) & np.isfinite(z)
+                        xs, ys, z = xs[valid], ys[valid], z[valid]
+                        
+                        if len(xs) > 100:
+                            X = (xs - self.K[0, 2]) * z / self.K[0, 0]
+                            Y = (ys - self.K[1, 2]) * z / self.K[1, 1]
+                            points_3d = np.stack([X, Y, z], axis=1)
+                            
+                            # Estimate bounding box size for screwdriver
+                            bbox_size = (0.15, 0.01, 0.01)  # length, width, height in meters
+                            
+                            self.viz_3d.update_pose(pose, points_3d, bbox_size)
+                except Exception as e:
+                    logging.debug(f"3D visualization update failed: {e}")
+            
+            # Draw status text
+            cv2.putText(color_image, f"Frame: {frame_count}", (10, 30), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+            cv2.putText(color_image, "POSE OK", (10, 60), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+            
+            # Add pose info with EMA
+            t = pose[:3, 3]
+            cv2.putText(color_image, f"Z: {t[2]:.2f}m (EMA: {self.z_ema:.2f}m)", (10, 90), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+        else:
+            # Determine failure reason for better debugging
+            reason = "UNKNOWN"
+            if frame_count < self.warmup_frames:
+                reason = "WARMUP"
+            elif not hasattr(self, 'last_detection') or self.last_detection is None:
+                reason = "NO_DETECTION"
+            elif not overall_valid:
+                reason = "QUALITY_GATE"
+            else:
+                reason = "INIT_FAILED"
+            
+            cv2.putText(color_image, f"Frame: {frame_count}", (10, 30), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            cv2.putText(color_image, f"NO POSE [{reason}]", (10, 60), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            
+            # Show current quality metrics
+            if hasattr(self, 'z_ema') and self.z_ema is not None:
+                cv2.putText(color_image, f"Z_EMA: {self.z_ema:.2f}m", (10, 90), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
                 
                 # Write output frame
                 if writer is not None:
@@ -768,6 +854,18 @@ class FoundationPosePipeline:
         self.start_time = None
         self.pose_history = []
         self.fps_history = []
+        
+        # Warmup and quality control
+        fp_config = self.config['foundationpose']
+        self.warmup_frames = fp_config.get('warmup_frames', 20)
+        self.init_gates = fp_config.get('init_gates', {})
+        self.track_gates = fp_config.get('track_gates', {})
+        self.failure_count = 0
+        self.z_ema = None
+        self.z_ema_alpha = fp_config.get('z_ema_alpha', 0.2)
+        
+        # 3D visualization
+        self.viz_3d = Pose3DVisualizer(enable_o3d=True)
         print("Pipeline reset")
 
 
