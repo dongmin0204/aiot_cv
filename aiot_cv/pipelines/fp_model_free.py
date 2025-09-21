@@ -453,7 +453,7 @@ class FoundationPosePipeline:
         spatial = rs.spatial_filter()         # Spatial filtering
         temporal = rs.temporal_filter()       # Temporal filtering
         hole_fill = rs.hole_filling_filter(1) # Fill holes
-        threshold = rs.threshold_filter(min=0.15, max=1.2)  # Depth range filter
+        # Note: threshold filter will be applied manually in numpy
         
         frame_count = 0
         
@@ -477,11 +477,15 @@ class FoundationPosePipeline:
                 depth_frame = spatial.process(depth_frame)
                 depth_frame = temporal.process(depth_frame)
                 depth_frame = hole_fill.process(depth_frame)
-                depth_frame = threshold.process(depth_frame)
                 
                 # Convert to numpy arrays
                 color_image = np.asanyarray(color_frame.get_data())
                 depth_image = np.asanyarray(depth_frame.get_data())
+                
+                # Apply manual depth threshold filter (0.15m to 1.2m)
+                depth_meters = depth_image.astype(np.float32) * self.depth_scale
+                depth_image = np.where((depth_meters >= 0.15) & (depth_meters <= 1.2), 
+                                     depth_image, 0)
                 
                 # Process frame through pipeline
                 pose = self.process_frame(color_image, depth_image)
