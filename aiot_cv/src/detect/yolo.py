@@ -67,26 +67,34 @@ class YoloSeg:
 		
 		print(f"YOLO initialized with {len(self.class_names)} classes: {self.class_names}")
 
-	def __call__(self, img_bgr: np.ndarray, depth: Optional[np.ndarray] = None) -> List[Detection]:
+	def __call__(self, img_bgr: np.ndarray, depth: Optional[np.ndarray] = None, **kwargs) -> List[Detection]:
 		"""
 		Run detection and return standardized Detection objects.
 		
 		Args:
 			img_bgr: Input BGR image (H, W, 3)
 			depth: Optional depth image (H, W) - will be cropped to match detections
+			**kwargs: Additional arguments for YOLO inference (conf, classes, etc.)
 			
 		Returns:
 			List of Detection objects with ROIs
 		"""
 		assert self.model is not None, "ultralytics not available"
 		
+		# Prepare inference arguments
+		infer_args = {
+			'source': img_bgr,
+			'imgsz': self.imgsz,
+			'conf': kwargs.get('conf', self.conf),
+			'verbose': False
+		}
+		
+		# Add classes filter if provided
+		if 'classes' in kwargs:
+			infer_args['classes'] = kwargs['classes']
+		
 		# Run YOLO inference
-		res = self.model.predict(
-			source=img_bgr, 
-			imgsz=self.imgsz, 
-			conf=self.conf, 
-			verbose=False
-		)[0]
+		res = self.model.predict(**infer_args)[0]
 		
 		detections = []
 		boxes = res.boxes
@@ -153,7 +161,7 @@ class YoloSeg:
 		return img[y1:y2, x1:x2]
 	
 	def get_best_detection(self, img_bgr: np.ndarray, depth: Optional[np.ndarray] = None,
-	                      target_class: Optional[str] = None) -> Optional[Detection]:
+	                      target_class: Optional[str] = None, **kwargs) -> Optional[Detection]:
 		"""
 		Get the best (highest confidence) detection.
 		
@@ -161,11 +169,12 @@ class YoloSeg:
 			img_bgr: Input BGR image
 			depth: Optional depth image
 			target_class: Filter by class name (optional)
+			**kwargs: Additional arguments for YOLO inference
 			
 		Returns:
 			Best Detection or None
 		"""
-		detections = self(img_bgr, depth)
+		detections = self(img_bgr, depth, **kwargs)
 		
 		if not detections:
 			return None
