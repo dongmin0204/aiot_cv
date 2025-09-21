@@ -661,71 +661,71 @@ class FoundationPosePipeline:
                 # Process frame through pipeline
                 pose = self.process_frame(color_image, depth_image)
                 
-        # Draw visualization with detailed status and 3D overlay
-        if pose is not None:
-            # 2D pose axes overlay
-            color_image = self._draw_pose_axes(color_image, pose)
-            
-            # Enhanced 3D visualization overlay
-            color_image = self.viz_3d.draw_pose_on_image(color_image, pose, self.K, axis_length=0.1)
-            
-            # Update 3D visualizer if available
-            if hasattr(self, 'viz_3d') and self.viz_3d.enable_o3d:
-                # Create point cloud for 3D visualization
-                try:
-                    if roi_depth is not None and mask is not None:
-                        depth_m = roi_depth.astype(np.float32) * self.depth_scale
-                        mask_binary = (mask > 0).astype(np.uint8)
-                        
-                        # Backproject to point cloud
-                        ys, xs = np.where(mask_binary > 0)
-                        z = depth_m[ys, xs]
-                        valid = (z > 0) & np.isfinite(z)
-                        xs, ys, z = xs[valid], ys[valid], z[valid]
-                        
-                        if len(xs) > 100:
-                            X = (xs - self.K[0, 2]) * z / self.K[0, 0]
-                            Y = (ys - self.K[1, 2]) * z / self.K[1, 1]
-                            points_3d = np.stack([X, Y, z], axis=1)
-                            
-                            # Estimate bounding box size for screwdriver
-                            bbox_size = (0.15, 0.01, 0.01)  # length, width, height in meters
-                            
-                            self.viz_3d.update_pose(pose, points_3d, bbox_size)
-                except Exception as e:
-                    logging.debug(f"3D visualization update failed: {e}")
-            
-            # Draw status text
-            cv2.putText(color_image, f"Frame: {frame_count}", (10, 30), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-            cv2.putText(color_image, "POSE OK", (10, 60), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-            
-            # Add pose info with EMA
-            t = pose[:3, 3]
-            cv2.putText(color_image, f"Z: {t[2]:.2f}m (EMA: {self.z_ema:.2f}m)", (10, 90), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-        else:
-            # Determine failure reason for better debugging
-            reason = "UNKNOWN"
-            if frame_count < self.warmup_frames:
-                reason = "WARMUP"
-            elif not hasattr(self, 'last_detection') or self.last_detection is None:
-                reason = "NO_DETECTION"
-            elif not overall_valid:
-                reason = "QUALITY_GATE"
-            else:
-                reason = "INIT_FAILED"
-            
-            cv2.putText(color_image, f"Frame: {frame_count}", (10, 30), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-            cv2.putText(color_image, f"NO POSE [{reason}]", (10, 60), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-            
-            # Show current quality metrics
-            if hasattr(self, 'z_ema') and self.z_ema is not None:
-                cv2.putText(color_image, f"Z_EMA: {self.z_ema:.2f}m", (10, 90), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+                # Draw visualization with detailed status and 3D overlay
+                if pose is not None:
+                    # 2D pose axes overlay
+                    color_image = self._draw_pose_axes(color_image, pose)
+                    
+                    # Enhanced 3D visualization overlay
+                    color_image = self.viz_3d.draw_pose_on_image(color_image, pose, self.K, axis_length=0.1)
+                    
+                    # Update 3D visualizer if available
+                    if hasattr(self, 'viz_3d') and self.viz_3d.enable_o3d:
+                        # Create point cloud for 3D visualization
+                        try:
+                            if roi_depth is not None and mask is not None:
+                                depth_m = roi_depth.astype(np.float32) * self.depth_scale
+                                mask_binary = (mask > 0).astype(np.uint8)
+                                
+                                # Backproject to point cloud
+                                ys, xs = np.where(mask_binary > 0)
+                                z = depth_m[ys, xs]
+                                valid = (z > 0) & np.isfinite(z)
+                                xs, ys, z = xs[valid], ys[valid], z[valid]
+                                
+                                if len(xs) > 100:
+                                    X = (xs - self.K[0, 2]) * z / self.K[0, 0]
+                                    Y = (ys - self.K[1, 2]) * z / self.K[1, 1]
+                                    points_3d = np.stack([X, Y, z], axis=1)
+                                    
+                                    # Estimate bounding box size for screwdriver
+                                    bbox_size = (0.15, 0.01, 0.01)  # length, width, height in meters
+                                    
+                                    self.viz_3d.update_pose(pose, points_3d, bbox_size)
+                        except Exception as e:
+                            logging.debug(f"3D visualization update failed: {e}")
+                    
+                    # Draw status text
+                    cv2.putText(color_image, f"Frame: {frame_count}", (10, 30), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                    cv2.putText(color_image, "POSE OK", (10, 60), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                    
+                    # Add pose info with EMA
+                    t = pose[:3, 3]
+                    cv2.putText(color_image, f"Z: {t[2]:.2f}m (EMA: {self.z_ema:.2f}m)", (10, 90), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                else:
+                    # Determine failure reason for better debugging
+                    reason = "UNKNOWN"
+                    if frame_count < self.warmup_frames:
+                        reason = "WARMUP"
+                    elif not hasattr(self, 'last_detection') or self.last_detection is None:
+                        reason = "NO_DETECTION"
+                    elif not overall_valid:
+                        reason = "QUALITY_GATE"
+                    else:
+                        reason = "INIT_FAILED"
+                    
+                    cv2.putText(color_image, f"Frame: {frame_count}", (10, 30), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                    cv2.putText(color_image, f"NO POSE [{reason}]", (10, 60), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                    
+                    # Show current quality metrics
+                    if hasattr(self, 'z_ema') and self.z_ema is not None:
+                        cv2.putText(color_image, f"Z_EMA: {self.z_ema:.2f}m", (10, 90), 
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
                 
                 # Write output frame
                 if writer is not None:
