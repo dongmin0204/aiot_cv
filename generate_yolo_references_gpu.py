@@ -35,10 +35,25 @@ def generate_yolo_references():
     model = YOLO(yolo_weights)
     model.to(device)
     
-    # Get reference images (ref_01.png ~ ref_44.png)
+    # Get all reference images in the directory (handles both ref_01.png and ref_045.png formats)
     ref_images = []
-    for i in range(1, 117):  # ref_01.png to ref_44.png
-        ref_images.append(f"ref_{i:02d}.png")
+    import glob
+    
+    # Find all ref_*.png files
+    ref_pattern = os.path.join(output_dir, "ref_*.png")
+    ref_files = glob.glob(ref_pattern)
+    
+    # Filter out mask files and sort numerically
+    ref_images_raw = [os.path.basename(f) for f in ref_files if not f.endswith('_mask.png')]
+    
+    # Sort by the numeric part
+    def extract_number(filename):
+        # Extract number from ref_XX.png or ref_XXX.png
+        import re
+        match = re.search(r'ref_(\d+)\.png', filename)
+        return int(match.group(1)) if match else 0
+    
+    ref_images = sorted(ref_images_raw, key=extract_number)
     
     print(f"Processing {len(ref_images)} reference images")
     
@@ -92,8 +107,9 @@ def generate_yolo_references():
                 # Convert to binary mask (0/255)
                 mask_binary = (mask_resized > 0.5).astype(np.uint8) * 255
                 
-                # Generate output filename for mask
-                ref_mask_name = f"ref_{i+1:02d}_mask.png"
+                # Generate output filename for mask based on original filename
+                base_name = os.path.splitext(img_file)[0]  # Remove .png extension
+                ref_mask_name = f"{base_name}_mask.png"
                 ref_mask_path = os.path.join(output_dir, ref_mask_name)
                 
                 # Save mask (reference image is already saved)
