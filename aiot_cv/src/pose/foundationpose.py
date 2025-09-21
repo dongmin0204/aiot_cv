@@ -122,6 +122,7 @@ class FoundationPoseWrapper:
             if img is None:
                 print(f"Warning: Could not load image {img_path}")
                 continue
+            # Convert BGR to RGB for consistency with real-time processing
             img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
             images.append(img)
             
@@ -138,13 +139,17 @@ class FoundationPoseWrapper:
                 mask_path = os.path.join(masks_dir, mask_file)
                 if os.path.exists(mask_path):
                     mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
-                    mask = (mask > 127).astype(np.uint8)
+                    # Ensure mask is single channel and binary (0/255)
+                    if mask is not None:
+                        if len(mask.shape) == 3:
+                            mask = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
+                        mask = (mask > 127).astype(np.uint8) * 255
                     print(f"Loaded mask: {mask_file}")
                     break
             
             if mask is None:
                 print(f"Warning: Mask not found for {img_file}, creating dummy mask")
-                mask = np.ones(img.shape[:2], dtype=np.uint8)
+                mask = np.ones(img.shape[:2], dtype=np.uint8) * 255
             
             masks.append(mask)
             names.append(base_name)
@@ -166,7 +171,11 @@ class FoundationPoseWrapper:
             names=names
         )
         
-        print(f"Loaded {len(images)} reference images from {refs_dir}")
+        print(f"[Refs] loaded {len(images)} refs from {refs_dir}")
+        for i, (img, mask) in enumerate(zip(images, masks)):
+            mask_unique = set(np.unique(mask))
+            print(f"  - ref[{i}]: img{img.shape} mask{mask.shape} binary={mask_unique}")
+        
         return self.refs_bundle
     
     def init_pose_from_refs(self, rgb: np.ndarray, depth: Optional[np.ndarray] = None, 

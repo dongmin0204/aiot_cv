@@ -94,6 +94,9 @@ class FoundationPosePipeline:
         self.is_initialized = False
         self.current_pose = None
         
+        # Initialization cooldown to prevent spam
+        self.init_cooldown_until = 0
+        
         print(f"FoundationPose pipeline initialized with config: {config_path}")
     
     def _load_config(self, config_path: str) -> Dict[str, Any]:
@@ -265,6 +268,18 @@ class FoundationPosePipeline:
         
         # Step 4: FoundationPose estimation
         if self.current_pose is None:
+            # Check cooldown to prevent initialization spam
+            now = time.time()
+            if now < self.init_cooldown_until:
+                logging.debug(f"[Init] Cooldown active, skipping initialization")
+                return self.current_pose
+            
+            # Check detection confidence threshold
+            if detection.confidence < 0.75:
+                logging.debug(f"[Init] Low confidence ({detection.confidence:.3f}), setting cooldown")
+                self.init_cooldown_until = now + 0.2
+                return self.current_pose
+            
             # Initialize pose from reference images
             logging.info("Initializing pose from references...")
             
@@ -281,6 +296,20 @@ class FoundationPosePipeline:
             logging.debug(f"[Debug] Saved ROI to {dbg_dir}")
             
             pose = self.fp_wrapper.init_pose_from_refs(roi_rgb, roi_depth, mask)
+            
+            # Check initialization result
+            if pose is None:
+                logging.warning("[Init] ref match failed -> trying fallback (PCL)")
+            else:
+                ok = np.isfinite(pose).all() and pose.shape == (4,4) and pose[2,3] > 0
+                logging.info(f"[Init] ref match pose z={pose[2,3]:.4f} valid={ok}")
+                if not ok:
+                    logging.warning("[Init] Invalid pose detected, falling back to PCL")
+                    pose = None
+            
+            # Set cooldown if initialization failed
+            if pose is None:
+                self.init_cooldown_until = now + 0.2  # 200ms cooldown
             
             # Fallback: Coarse initialization from point cloud if reference matching fails
             if pose is None and roi_depth is not None and mask is not None:
