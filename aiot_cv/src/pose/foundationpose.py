@@ -163,8 +163,8 @@ class FoundationPoseWrapper:
                     break
             
             if mask is None:
-                print(f"Warning: Mask not found for {img_file}, creating dummy mask")
-                mask = np.ones(img.shape[:2], dtype=np.uint8) * 255
+                print(f"Warning: Mask not found for {img_file}, skipping this reference")
+                continue  # Skip references without masks
             
             masks.append(mask)
             names.append(base_name)
@@ -347,58 +347,122 @@ class FoundationPoseWrapper:
         return self.init_pose_from_refs(rgb, depth, mask)
     
     def _find_best_reference(self, rgb: np.ndarray, mask: Optional[np.ndarray] = None) -> Optional[int]:
-        """Find best matching reference image with improved matching."""
+        """Find best matching reference image with enhanced feature matching."""
+        if len(self.refs_bundle.images) == 0:
+            print("[RefMatch] No reference images available")
+            return None
+        
+        print(f"[RefMatch] Searching through {len(self.refs_bundle.images)} references")
+        
         best_score = -1
         best_idx = None
         scores = []
+        detailed_results = []
         
-        # Ensure consistent preprocessing
-        query_preprocessed = self._preprocess_for_matching(rgb, mask)
+        # Enhanced preprocessing with CLAHE
+        query_preprocessed = self._preprocess_for_matching(rgb, mask, use_clahe=True)
+        
+        # Initialize ORB detector with enhanced parameters
+        orb = cv2.ORB_create(
+            nfeatures=3000,
+            scaleFactor=1.2,
+            nlevels=8,
+            edgeThreshold=15,  # Reduced for more features on thin objects
+            firstLevel=0,
+            WTA_K=2,
+            scoreType=cv2.ORB_HARRIS_SCORE,
+            patchSize=31
+        )
+        
+        # BFMatcher with cross-check enabled
+        bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
         
         for i, ref_img in enumerate(self.refs_bundle.images):
+            ref_name = self.refs_bundle.names[i] if i < len(self.refs_bundle.names) else f"ref_{i}"
+            print(f"[RefMatch] Testing {ref_name} ({i+1}/{len(self.refs_bundle.images)})")
+            
             # Apply same preprocessing to reference
-            ref_preprocessed = self._preprocess_for_matching(ref_img, self.refs_bundle.masks[i])
+            ref_preprocessed = self._preprocess_for_matching(ref_img, self.refs_bundle.masks[i], use_clahe=True)
             
-            # Multiple matching methods for robustness
-            scores_i = []
+            # Convert to grayscale for feature detection
+            query_gray = cv2.cvtColor(query_preprocessed, cv2.COLOR_RGB2GRAY)
+            ref_gray = cv2.cvtColor(ref_preprocessed, cv2.COLOR_RGB2GRAY)
             
-            # 1) Template matching (original method)
+            # Feature detection and matching
+            kp1, des1 = orb.detectAndCompute(query_gray, None)
+            kp2, des2 = orb.detectAndCompute(ref_gray, None)
+            
+            feature_score = 0.0
+            num_matches = 0
+            num_good_matches = 0
+            
+            if des1 is not None and des2 is not None and len(des1) > 10 and len(des2) > 10:
+                # K-NN matching with ratio test
+                matches = bf.knnMatch(des1, des2, k=2)
+                
+                # Ratio test (Lowe's ratio test) - relaxed for thin objects
+                good_matches = []
+                for match_pair in matches:
+                    if len(match_pair) == 2:
+                        m, n = match_pair
+                        if m.distance < 0.8 * n.distance:  # Relaxed from 0.75 to 0.8
+                            good_matches.append(m)
+                
+                num_matches = len(matches)
+                num_good_matches = len(good_matches)
+                
+                if num_good_matches >= 8:  # Minimum matches for thin objects
+                    # Calculate feature matching score
+                    avg_distance = np.mean([m.distance for m in good_matches])
+                    max_distance = 256  # ORB descriptor distance range
+                    feature_score = max(0, (max_distance - avg_distance) / max_distance)
+                    
+                    # Try geometric verification with relaxed RANSAC
+                    if num_good_matches >= 12:
+                        src_pts = np.float32([kp1[m.queryIdx].pt for m in good_matches]).reshape(-1, 1, 2)
+                        dst_pts = np.float32([kp2[m.trainIdx].pt for m in good_matches]).reshape(-1, 1, 2)
+                        
+                        H, inliers = cv2.findHomography(
+                            dst_pts, src_pts, 
+                            cv2.RANSAC, 
+                            ransacReprojThreshold=6.0,  # Relaxed from 3.0 to 6.0
+                            confidence=0.995,
+                            maxIters=3000
+                        )
+                        
+                        if inliers is not None:
+                            inlier_ratio = np.sum(inliers) / len(good_matches)
+                            feature_score *= (0.5 + 0.5 * inlier_ratio)  # Boost score with geometric consistency
+                            print(f"[RefMatch] {ref_name}: features={len(kp1)}/{len(kp2)}, matches={num_good_matches}, inliers={np.sum(inliers)}, ratio={inlier_ratio:.2f}")
+                        else:
+                            print(f"[RefMatch] {ref_name}: features={len(kp1)}/{len(kp2)}, matches={num_good_matches}, homography_failed")
+                    else:
+                        print(f"[RefMatch] {ref_name}: features={len(kp1)}/{len(kp2)}, matches={num_good_matches} (insufficient for geometry)")
+                else:
+                    print(f"[RefMatch] {ref_name}: features={len(kp1)}/{len(kp2)}, matches={num_good_matches} (too few)")
+            else:
+                print(f"[RefMatch] {ref_name}: feature_detection_failed, kp1={len(kp1) if kp1 else 0}, kp2={len(kp2) if kp2 else 0}")
+            
+            # Template matching as backup
             h, w = query_preprocessed.shape[:2]
             ref_resized = cv2.resize(ref_preprocessed, (w, h))
+            template_score = cv2.matchTemplate(query_gray, cv2.cvtColor(ref_resized, cv2.COLOR_RGB2GRAY), cv2.TM_CCOEFF_NORMED)[0, 0]
             
-            template_score = cv2.matchTemplate(
-                cv2.cvtColor(query_preprocessed, cv2.COLOR_RGB2GRAY),
-                cv2.cvtColor(ref_resized, cv2.COLOR_RGB2GRAY),
-                cv2.TM_CCOEFF_NORMED
-            )[0, 0]
-            scores_i.append(template_score)
+            # Combined score: prioritize feature matching, fallback to template
+            if feature_score > 0.1:
+                combined_score = 0.8 * feature_score + 0.2 * template_score
+            else:
+                combined_score = template_score
             
-            # 2) Gradient NCC (for texture-weak scenes)
-            grad_score = self._compute_gradient_ncc(query_preprocessed, ref_resized)
-            scores_i.append(grad_score)
-            
-            # 3) Histogram correlation
-            hist_score = cv2.compareHist(
-                cv2.calcHist([cv2.cvtColor(query_preprocessed, cv2.COLOR_RGB2GRAY)], [0], None, [256], [0, 256]),
-                cv2.calcHist([cv2.cvtColor(ref_resized, cv2.COLOR_RGB2GRAY)], [0], None, [256], [0, 256]),
-                cv2.HISTCMP_CORREL
-            )
-            scores_i.append(hist_score)
-            
-            # 4) Structural similarity (if available)
-            try:
-                from skimage.metrics import structural_similarity as ssim
-                gray1 = cv2.cvtColor(query_preprocessed, cv2.COLOR_RGB2GRAY)
-                gray2 = cv2.cvtColor(ref_resized, cv2.COLOR_RGB2GRAY)
-                ssim_score = ssim(gray1, gray2)
-                scores_i.append(ssim_score)
-            except ImportError:
-                ssim_score = 0.0
-                scores_i.append(ssim_score)
-            
-            # Weighted combination of scores (adjusted for gradient NCC)
-            combined_score = (0.4 * template_score + 0.3 * grad_score + 0.2 * ssim_score + 0.1 * hist_score)
             scores.append(combined_score)
+            detailed_results.append({
+                'name': ref_name,
+                'score': combined_score,
+                'feature_score': feature_score,
+                'template_score': template_score,
+                'matches': num_good_matches,
+                'keypoints': (len(kp1) if kp1 else 0, len(kp2) if kp2 else 0)
+            })
             
             if combined_score > best_score:
                 best_score = combined_score
@@ -413,21 +477,39 @@ class FoundationPoseWrapper:
         else:
             adaptive_thr = 0.2  # fallback
         
-        # Margin validation (best vs second best) - relaxed for thin objects
-        margin_delta = 0.03  # Reduced from 0.05 to 0.03 for thin objects
+        # Margin validation (best vs second best) - very relaxed for thin objects
+        margin_delta = 0.02  # Further reduced from 0.03 to 0.02
         if len(scores_sorted) >= 2:
             best_score, second_best = scores_sorted[0], scores_sorted[1]
             margin_ok = (best_score - second_best) >= margin_delta
         else:
             margin_ok = True  # only one reference
         
-        # Combined validation - more lenient for thin objects
-        basic_threshold = max(0.12, adaptive_thr * 0.8)  # Lower floor, 80% of adaptive
+        # Combined validation - very lenient for thin objects
+        basic_threshold = max(0.08, adaptive_thr * 0.6)  # Lower floor, 60% of adaptive
         valid_by_adaptive = (best_score >= basic_threshold) and margin_ok
         
-        # Log detailed matching scores
-        print(f"[RefMatch] N={len(self.refs_bundle.images)} | best={best_score:.3f} (δ={best_score-scores_sorted[1] if len(scores_sorted)>1 else 0:.3f}) | thr={adaptive_thr:.2f} | valid={valid_by_adaptive}")
-        print(f"[RefMatch] scores={[f'{s:.3f}' for s in scores_sorted[:5]]}")  # Show top 5
+        # Log detailed matching results
+        print(f"[RefMatch] === MATCHING SUMMARY ===")
+        print(f"[RefMatch] Processed {len(self.refs_bundle.images)} references")
+        print(f"[RefMatch] Best: {detailed_results[best_idx]['name'] if best_idx is not None else 'None'} | Score: {best_score:.3f}")
+        print(f"[RefMatch] Threshold: {basic_threshold:.3f} | Margin OK: {margin_ok}")
+        print(f"[RefMatch] Valid: {valid_by_adaptive}")
+        
+        # Show top 3 results
+        sorted_results = sorted(detailed_results, key=lambda x: x['score'], reverse=True)
+        print(f"[RefMatch] Top 3 candidates:")
+        for i, result in enumerate(sorted_results[:3]):
+            print(f"[RefMatch]   {i+1}. {result['name']}: score={result['score']:.3f}, "
+                  f"features={result['feature_score']:.3f}, template={result['template_score']:.3f}, "
+                  f"matches={result['matches']}, kpts={result['keypoints']}")
+        
+        # Show failure reasons if no match found
+        if not valid_by_adaptive:
+            if best_score < basic_threshold:
+                print(f"[RefMatch] FAIL: Best score {best_score:.3f} < threshold {basic_threshold:.3f}")
+            if not margin_ok:
+                print(f"[RefMatch] FAIL: Insufficient margin {best_score-scores_sorted[1]:.3f} < {margin_delta:.3f}")
         
         return best_idx if valid_by_adaptive else None
     
@@ -449,6 +531,11 @@ class FoundationPoseWrapper:
         if mask is not None:
             mask_resized = cv2.resize(mask.astype(np.uint8), (target_size, target_size), interpolation=cv2.INTER_NEAREST)
             mask_binary = (mask_resized > 127).astype(np.uint8)
+            
+            # Erode mask slightly to remove background noise (1px)
+            kernel = np.ones((3, 3), np.uint8)
+            mask_binary = cv2.erode(mask_binary, kernel, iterations=1)
+            
             # Set background to black
             img_resized = img_resized * mask_binary[:, :, np.newaxis]
         
