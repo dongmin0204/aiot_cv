@@ -165,7 +165,25 @@ class FoundationPosePipeline:
         detection = detections[0]
         print(f"Best detection: {detection.class_name} (conf={detection.confidence:.3f})")
         
-        # Step 2: Extract ROI and mask
+        # Step 2: Auto-switch references based on detected class
+        tool = detection.class_name.lower()
+        tool_dir = Path(self.config['references']['refs_dir']) / tool
+        
+        if tool_dir.exists():
+            if getattr(self, "_loaded_tool", None) != tool:
+                print(f"[Refs] Switching to: {tool_dir}")
+                self.fp_wrapper.load_refs_bundle(str(tool_dir), self.K, self.depth_scale)
+                self._loaded_tool = tool
+        else:
+            print(f"[Refs] Missing directory: {tool_dir}")
+            # Try fallback to generic references
+            generic_dir = Path(self.config['references']['refs_dir'])
+            if generic_dir.exists() and getattr(self, "_loaded_tool", None) != "generic":
+                print(f"[Refs] Using generic references: {generic_dir}")
+                self.fp_wrapper.load_refs_bundle(str(generic_dir), self.K, self.depth_scale)
+                self._loaded_tool = "generic"
+        
+        # Step 3: Extract ROI and mask
         roi_rgb = detection.roi_rgb
         roi_depth = detection.roi_depth
         mask = detection.mask
@@ -177,11 +195,62 @@ class FoundationPosePipeline:
         # Convert BGR to RGB for FoundationPose
         roi_rgb = cv2.cvtColor(roi_rgb, cv2.COLOR_BGR2RGB)
         
-        # Step 3: FoundationPose estimation
+        # Resize ROI to standard size for better matching
+        target_size = 256
+        if roi_rgb.shape[:2] != (target_size, target_size):
+            roi_rgb = cv2.resize(roi_rgb, (target_size, target_size), interpolation=cv2.INTER_LINEAR)
+        if roi_depth is not None and roi_depth.shape != (target_size, target_size):
+            roi_depth = cv2.resize(roi_depth, (target_size, target_size), interpolation=cv2.INTER_NEAREST)
+        if mask is not None and mask.shape != (target_size, target_size):
+            mask = cv2.resize(mask.astype(np.uint8), (target_size, target_size), interpolation=cv2.INTER_NEAREST).astype(bool)
+        
+        # Step 4: FoundationPose estimation
         if self.current_pose is None:
             # Initialize pose from reference images
             print("Initializing pose from references...")
+            
+            # Debug: Save ROI and mask for analysis
+            dbg_dir = Path("debug_roi")
+            dbg_dir.mkdir(exist_ok=True)
+            cv2.imwrite(str(dbg_dir / f"roi_rgb_{self.frame_count:06d}.png"), 
+                       cv2.cvtColor(roi_rgb, cv2.COLOR_RGB2BGR))
+            if roi_depth is not None:
+                np.save(str(dbg_dir / f"roi_depth_{self.frame_count:06d}.npy"), roi_depth)
+            if mask is not None:
+                cv2.imwrite(str(dbg_dir / f"roi_mask_{self.frame_count:06d}.png"), 
+                           (mask.astype(np.uint8) * 255))
+            print(f"[Debug] Saved ROI to {dbg_dir}")
+            
             pose = self.fp_wrapper.init_pose_from_refs(roi_rgb, roi_depth, mask)
+            
+            # Fallback: Coarse initialization from point cloud if reference matching fails
+            if pose is None and roi_depth is not None and mask is not None:
+                print("[Fallback] Attempting coarse initialization from point cloud...")
+                try:
+                    # Generate point cloud from depth and mask
+                    from aiot_cv.src.pc.pointcloud import rgbd_to_pcl, filter_pointcloud
+                    pcl = rgbd_to_pcl(roi_rgb, roi_depth, self.K, self.depth_scale, mask)
+                    if pcl is not None and len(pcl) > 500:
+                        pcl = filter_pointcloud(pcl)
+                        if len(pcl) > 100:
+                            # Simple PCA-based initialization
+                            centroid = np.mean(pcl, axis=0)
+                            centered_pcl = pcl - centroid
+                            _, _, Vt = np.linalg.svd(centered_pcl)
+                            R0 = Vt.T
+                            if np.linalg.det(R0) < 0:
+                                R0[:, 2] *= -1
+                            
+                            pose = np.eye(4, dtype=np.float64)
+                            pose[:3, :3] = R0
+                            pose[:3, 3] = centroid
+                            print(f"[Fallback] Coarse pose initialized from {len(pcl)} points")
+                        else:
+                            print("[Fallback] Insufficient points after filtering")
+                    else:
+                        print("[Fallback] Insufficient point cloud data")
+                except Exception as e:
+                    print(f"[Fallback] Point cloud initialization failed: {e}")
         else:
             # Track pose
             print("Tracking pose...")

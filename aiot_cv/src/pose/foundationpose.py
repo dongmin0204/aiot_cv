@@ -75,6 +75,15 @@ class FoundationPoseWrapper:
         │   └── ...
         └── poses.json (optional)  # Reference poses if available
         
+        Or with tool_class subdirectory:
+        refs_dir/
+        ├── images/tool_class/
+        │   ├── ref_001.jpg
+        │   └── ...
+        ├── masks/tool_class/
+        │   ├── ref_001.png
+        │   └── ...
+        
         Args:
             refs_dir: Directory containing reference images and masks
             K: Camera intrinsics (3, 3)
@@ -83,8 +92,15 @@ class FoundationPoseWrapper:
         Returns:
             RefsBundle object
         """
-        images_dir = os.path.join(refs_dir, "images")
-        masks_dir = os.path.join(refs_dir, "masks")
+        # Check for tool_class subdirectory structure
+        if os.path.exists(os.path.join(refs_dir, "images")):
+            images_dir = os.path.join(refs_dir, "images")
+            masks_dir = os.path.join(refs_dir, "masks")
+        else:
+            # Direct structure (images and masks in refs_dir)
+            images_dir = refs_dir
+            masks_dir = refs_dir
+        
         poses_file = os.path.join(refs_dir, "poses.json")
         
         if not os.path.exists(images_dir):
