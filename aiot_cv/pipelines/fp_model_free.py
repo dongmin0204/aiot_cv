@@ -414,11 +414,11 @@ class FoundationPosePipeline:
                            (mask.astype(np.uint8) * 255))
             logging.debug(f"[Debug] Saved ROI to {dbg_dir}")
             
-        pose = None
-        if overall_valid:
-            pose = self.fp_wrapper.init_pose_from_refs(roi_rgb, roi_depth, mask)
-        else:
-            logging.info("[Init] Skipping initialization due to quality gate failure")
+            pose = None
+            if overall_valid:
+                pose = self.fp_wrapper.init_pose_from_refs(roi_rgb, roi_depth, mask)
+            else:
+                logging.info("[Init] Skipping initialization due to quality gate failure")
             
             # Check initialization result
             if pose is None:
