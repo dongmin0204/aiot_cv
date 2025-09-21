@@ -439,7 +439,7 @@ class FoundationPosePipeline:
             logging.debug(f"[Debug] Saved ROI to {dbg_dir}")
         else:
             # No depth/mask available - quality gating not applicable  
-            # In this case, overall_valid remains True (initialized above)
+            # In this case, overall_valid remains 0.6 (fixed value)
             logging.info("[QualityGate] No depth/mask available, skipping quality checks")
         
         # Step 4: FoundationPose estimation (initialization or tracking)
