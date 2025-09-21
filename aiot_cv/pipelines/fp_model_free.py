@@ -157,8 +157,12 @@ class FoundationPosePipeline:
         # Step 1: YOLO detection
         detections = self.detector(rgb, depth)
         
+        # Class filter - only allow screwdriver for now
+        allowed_classes = {"screwdriver"}
+        detections = [d for d in detections if d.class_name.lower() in allowed_classes]
+        
         if not detections:
-            print("No detections found")
+            print("No detections found (after class filter)")
             return None
         
         # Get best detection (highest confidence)
@@ -195,14 +199,30 @@ class FoundationPosePipeline:
         # Convert BGR to RGB for FoundationPose
         roi_rgb = cv2.cvtColor(roi_rgb, cv2.COLOR_BGR2RGB)
         
+        # Safe mask booleanization (handle different mask formats)
+        if mask is not None:
+            if mask.dtype == np.uint8:
+                mask = mask > 0
+            else:
+                mask = mask > 0.5
+        
         # Resize ROI to standard size for better matching
         target_size = 256
+        h, w = roi_rgb.shape[:2]
+        
         if roi_rgb.shape[:2] != (target_size, target_size):
             roi_rgb = cv2.resize(roi_rgb, (target_size, target_size), interpolation=cv2.INTER_LINEAR)
+        
         if roi_depth is not None and roi_depth.shape != (target_size, target_size):
             roi_depth = cv2.resize(roi_depth, (target_size, target_size), interpolation=cv2.INTER_NEAREST)
+        
         if mask is not None and mask.shape != (target_size, target_size):
             mask = cv2.resize(mask.astype(np.uint8), (target_size, target_size), interpolation=cv2.INTER_NEAREST).astype(bool)
+        
+        # Ensure all arrays have consistent shapes
+        if roi_depth is not None and mask is not None:
+            if roi_depth.shape[:2] != mask.shape[:2]:
+                mask = cv2.resize(mask.astype(np.uint8), roi_depth.shape[:2], interpolation=cv2.INTER_NEAREST).astype(bool)
         
         # Step 4: FoundationPose estimation
         if self.current_pose is None:
@@ -226,12 +246,27 @@ class FoundationPosePipeline:
             # Fallback: Coarse initialization from point cloud if reference matching fails
             if pose is None and roi_depth is not None and mask is not None:
                 print("[Fallback] Attempting coarse initialization from point cloud...")
+                
+                # Debug: Check valid depth points
+                valid = (roi_depth > 0)
+                if mask is not None:
+                    valid = valid & mask
+                nz = int(valid.sum())
+                print(f"[Debug] Valid depth points in ROI: {nz}")
+                
+                if nz < 500:
+                    print(f"[Fallback] Insufficient valid points ({nz} < 500)")
+                    return self.current_pose
+                
                 try:
                     # Generate point cloud from depth and mask
                     from aiot_cv.src.pc.pointcloud import rgbd_to_pcl, filter_pointcloud
                     pcl = rgbd_to_pcl(roi_rgb, roi_depth, self.K, self.depth_scale, mask)
                     if pcl is not None and len(pcl) > 500:
+                        print(f"[Debug] Generated point cloud with {len(pcl)} points")
                         pcl = filter_pointcloud(pcl)
+                        print(f"[Debug] After filtering: {len(pcl)} points")
+                        
                         if len(pcl) > 100:
                             # Simple PCA-based initialization
                             centroid = np.mean(pcl, axis=0)
@@ -251,6 +286,8 @@ class FoundationPosePipeline:
                         print("[Fallback] Insufficient point cloud data")
                 except Exception as e:
                     print(f"[Fallback] Point cloud initialization failed: {e}")
+                    import traceback
+                    traceback.print_exc()
         else:
             # Track pose
             print("Tracking pose...")
@@ -411,6 +448,13 @@ class FoundationPosePipeline:
         align_to = rs.stream.color
         align = rs.align(align_to)
         
+        # Setup depth filters for better quality
+        decimation = rs.decimation_filter(2)  # Reduce resolution, reduce noise
+        spatial = rs.spatial_filter()         # Spatial filtering
+        temporal = rs.temporal_filter()       # Temporal filtering
+        hole_fill = rs.hole_filling_filter(1) # Fill holes
+        threshold = rs.threshold_filter(min=0.15, max=1.2)  # Depth range filter
+        
         frame_count = 0
         
         try:
@@ -427,6 +471,13 @@ class FoundationPosePipeline:
                 
                 if not color_frame or not depth_frame:
                     continue
+                
+                # Apply depth filters
+                depth_frame = decimation.process(depth_frame)
+                depth_frame = spatial.process(depth_frame)
+                depth_frame = temporal.process(depth_frame)
+                depth_frame = hole_fill.process(depth_frame)
+                depth_frame = threshold.process(depth_frame)
                 
                 # Convert to numpy arrays
                 color_image = np.asanyarray(color_frame.get_data())

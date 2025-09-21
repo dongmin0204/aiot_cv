@@ -125,18 +125,29 @@ class FoundationPoseWrapper:
             img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
             images.append(img)
             
-            # Load corresponding mask
-            mask_file = os.path.splitext(img_file)[0] + '.png'
-            mask_path = os.path.join(masks_dir, mask_file)
-            if os.path.exists(mask_path):
-                mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
-                mask = (mask > 127).astype(np.uint8)
-            else:
+            # Load corresponding mask (try multiple naming conventions)
+            base_name = os.path.splitext(img_file)[0]
+            mask_candidates = [
+                base_name + '_mask.png',  # ref_01_mask.png
+                base_name + '.png',       # ref_01.png (if mask has same name)
+                base_name + '_mask.jpg',  # ref_01_mask.jpg
+            ]
+            
+            mask = None
+            for mask_file in mask_candidates:
+                mask_path = os.path.join(masks_dir, mask_file)
+                if os.path.exists(mask_path):
+                    mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+                    mask = (mask > 127).astype(np.uint8)
+                    print(f"Loaded mask: {mask_file}")
+                    break
+            
+            if mask is None:
                 print(f"Warning: Mask not found for {img_file}, creating dummy mask")
                 mask = np.ones(img.shape[:2], dtype=np.uint8)
-            masks.append(mask)
             
-            names.append(os.path.splitext(img_file)[0])
+            masks.append(mask)
+            names.append(base_name)
         
         # Load poses if available
         poses = None
