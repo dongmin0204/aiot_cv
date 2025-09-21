@@ -418,7 +418,7 @@ class FoundationPosePipeline:
             logging.info(f"[{gate_status}Gate] median_z={median_z:.3f}m, z_ema={self.z_ema:.3f}m")
             
             # Overall validity
-            overall_valid = conf_valid and mask_valid and depth_valid and global_depth_valid
+            overall_valid = mask_valid and depth_valid and global_depth_valid
             
             if not overall_valid:
                 failure_reasons = []
