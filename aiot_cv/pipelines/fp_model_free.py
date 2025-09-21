@@ -159,7 +159,7 @@ class FoundationPosePipeline:
         
         # Class filter - only allow screwdriver for now
         allowed_classes = {"screwdriver"}
-        detections = [d for d in detections if d.class_name.lower() in allowed_classes]
+        detections = [d for d in detections if d.class_name.lower().replace(' ', '_') in allowed_classes]
         
         if not detections:
             print("No detections found (after class filter)")
@@ -262,32 +262,60 @@ class FoundationPosePipeline:
                     # Generate point cloud from depth and mask
                     from aiot_cv.src.pc.pointcloud import rgbd_to_pcl, filter_pointcloud
                     pcl = rgbd_to_pcl(roi_rgb, roi_depth, self.K, self.depth_scale, mask)
-                    if pcl is not None and len(pcl) > 500:
-                        print(f"[Debug] Generated point cloud with {len(pcl)} points")
-                        pcl = filter_pointcloud(pcl)
-                        print(f"[Debug] After filtering: {len(pcl)} points")
-                        
-                        if len(pcl) > 100:
-                            # Simple PCA-based initialization
-                            centroid = np.mean(pcl, axis=0)
-                            centered_pcl = pcl - centroid
-                            _, _, Vt = np.linalg.svd(centered_pcl)
-                            R0 = Vt.T
-                            if np.linalg.det(R0) < 0:
-                                R0[:, 2] *= -1
-                            
-                            pose = np.eye(4, dtype=np.float64)
-                            pose[:3, :3] = R0
-                            pose[:3, 3] = centroid
-                            print(f"[Fallback] Coarse pose initialized from {len(pcl)} points")
-                        else:
-                            print("[Fallback] Insufficient points after filtering")
-                    else:
-                        print("[Fallback] Insufficient point cloud data")
+                    
+                    # 1) Normalize return type: Convert to Nx3 np.ndarray
+                    def to_xyz(arr):
+                        if arr is None:
+                            return None
+                        if isinstance(arr, dict):
+                            arr = arr.get('points', None)
+                        elif isinstance(arr, (list, tuple)):
+                            # Common pattern: (points, colors, normals) or (points, )
+                            arr = arr[0] if len(arr) > 0 else None
+                        if arr is None:
+                            return None
+                        arr = np.asarray(arr)
+                        # If (3,N) shape, transpose to (N,3)
+                        if arr.ndim == 2 and arr.shape[0] == 3 and arr.shape[1] != 3:
+                            arr = arr.T
+                        return arr
+
+                    pcl = to_xyz(pcl)
+                    print(f"[Debug] raw pcl type/shape:", type(pcl), getattr(pcl, 'shape', None))
+                    
+                    if pcl is None or pcl.size == 0 or pcl.ndim != 2 or pcl.shape[1] != 3:
+                        print(f"[Fallback] Invalid raw PCL shape: {None if pcl is None else pcl.shape}")
+                        raise ValueError("empty/invalid pcl after rgbd_to_pcl")
+
+                    # 2) Apply filter (normalize return again)
+                    pcl_f = filter_pointcloud(pcl)
+                    pcl_f = to_xyz(pcl_f) or pcl  # If filter returns invalid, keep original
+
+                    if pcl_f.ndim != 2 or pcl_f.shape[1] != 3:
+                        print(f"[Fallback] Filter returned unexpected shape {pcl_f.shape}, using raw pcl")
+                        pcl_f = pcl
+
+                    n = pcl_f.shape[0]
+                    print(f"[Debug] PCL after filtering -> shape: {pcl_f.shape}")
+                    print(f"[Debug] filtered pcl type/shape:", type(pcl_f), getattr(pcl_f, 'shape', None))
+                    
+                    if n < 100:  # Adjust threshold as needed
+                        print("[Fallback] Insufficient points after filtering")
+                        return self.current_pose
+
+                    # 3) Very simple initialization: R=I, t=centroid (stability first)
+                    centroid = pcl_f.mean(axis=0)
+                    pose = np.eye(4, dtype=np.float64)
+                    pose[:3, 3] = centroid
+                    
+                    print(f"[Fallback] Coarse pose initialized from {n} points (centroid: {centroid})")
+                    return pose
+
                 except Exception as e:
-                    print(f"[Fallback] Point cloud initialization failed: {e}")
+                    print(f"[Fallback] Coarse init failed robustly: {e}")
                     import traceback
                     traceback.print_exc()
+                    return self.current_pose
         else:
             # Track pose
             print("Tracking pose...")
