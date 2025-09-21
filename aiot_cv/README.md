@@ -117,11 +117,12 @@ python aiot_cv/pipelines/fp_model_free.py \
   --output output.mp4
 ```
 
-### RealSense 카메라 (향후 지원)
+### RealSense 카메라 실시간 처리
 ```bash
 python aiot_cv/pipelines/fp_model_free.py \
   --config config.yaml \
-  --realsense
+  --realsense \
+  --output realsense_output.mp4
 ```
 
 ## 🔧 파이프라인 흐름
@@ -147,8 +148,15 @@ python aiot_cv/pipelines/fp_model_free.py \
 ```bash
 pip install ultralytics opencv-python numpy
 pip install open3d scikit-learn  # 포인트클라우드 처리용
-pip install pyrealsense2  # RealSense 카메라용 (선택사항)
+pip install pyrealsense2  # RealSense 카메라용
 ```
+
+### RealSense 카메라 지원
+- **자동 내참 로딩**: RealSense에서 실시간으로 카메라 내부 정보 획득
+- **깊이-컬러 정렬**: 자동으로 깊이를 컬러 프레임에 정렬
+- **실시간 시각화**: 포즈 축, 프레임 정보, 상태 표시
+- **키보드 제어**: 'q' 종료, 'r' 추적 리셋
+- **녹화 지원**: `--output` 옵션으로 실시간 처리 결과 저장
 
 ### YOLO 가중치
 로컬 가중치를 우선 사용합니다:

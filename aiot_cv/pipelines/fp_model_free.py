@@ -279,10 +279,131 @@ class FoundationPosePipeline:
         print(f"Processed {frame_idx} frames")
         self._save_results(output_path)
     
-    def process_realsense(self):
-        """Process RealSense camera stream (placeholder)."""
-        print("RealSense processing not implemented yet")
-        print("Use process_frame() with RealSense RGB-D data")
+    def process_realsense(self, output_path: Optional[str] = None):
+        """
+        Process RealSense camera stream in real-time.
+        
+        Args:
+            output_path: Path to save output video (optional)
+        """
+        try:
+            import pyrealsense2 as rs
+        except ImportError:
+            print("Error: pyrealsense2 not installed. Install with: pip install pyrealsense2")
+            return
+        
+        # Configure RealSense pipeline
+        pipeline = rs.pipeline()
+        config = rs.config()
+        
+        # Enable color and depth streams
+        config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
+        config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
+        
+        # Start streaming
+        try:
+            profile = pipeline.start(config)
+            print("RealSense camera started successfully")
+            
+            # Get camera intrinsics from RealSense
+            color_profile = rs.video_stream_profile(profile.get_stream(rs.stream.color))
+            color_intrinsics = color_profile.get_intrinsics()
+            
+            # Update camera matrix from RealSense
+            self.K = np.array([
+                [color_intrinsics.fx, 0, color_intrinsics.ppx],
+                [0, color_intrinsics.fy, color_intrinsics.ppy],
+                [0, 0, 1]
+            ], dtype=np.float64)
+            
+            # Get depth scale
+            depth_sensor = profile.get_device().first_depth_sensor()
+            self.depth_scale = depth_sensor.get_depth_scale()
+            
+            print(f"RealSense intrinsics: fx={color_intrinsics.fx:.1f}, fy={color_intrinsics.fy:.1f}")
+            print(f"Depth scale: {self.depth_scale}")
+            
+        except Exception as e:
+            print(f"Failed to start RealSense camera: {e}")
+            return
+        
+        # Setup output video writer
+        writer = None
+        if output_path:
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            writer = cv2.VideoWriter(output_path, fourcc, 30.0, (640, 480))
+            print(f"Recording to: {output_path}")
+        
+        # Create align object to align depth to color
+        align_to = rs.stream.color
+        align = rs.align(align_to)
+        
+        frame_count = 0
+        
+        try:
+            print("Starting RealSense processing. Press 'q' to quit, 'r' to reset tracking.")
+            
+            while True:
+                # Wait for frames
+                frames = pipeline.wait_for_frames()
+                
+                # Align depth to color
+                aligned_frames = align.process(frames)
+                color_frame = aligned_frames.get_color_frame()
+                depth_frame = aligned_frames.get_depth_frame()
+                
+                if not color_frame or not depth_frame:
+                    continue
+                
+                # Convert to numpy arrays
+                color_image = np.asanyarray(color_frame.get_data())
+                depth_image = np.asanyarray(depth_frame.get_data())
+                
+                # Process frame through pipeline
+                pose = self.process_frame(color_image, depth_image)
+                
+                # Draw visualization
+                if pose is not None:
+                    color_image = self._draw_pose_axes(color_image, pose)
+                    # Draw info text
+                    cv2.putText(color_image, f"Frame: {frame_count}", (10, 30), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                    cv2.putText(color_image, "Pose: OK", (10, 70), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                else:
+                    cv2.putText(color_image, "No pose", (10, 70), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+                
+                # Write output frame
+                if writer is not None:
+                    writer.write(color_image)
+                
+                # Display image
+                cv2.imshow('FoundationPose RealSense', color_image)
+                
+                # Handle keyboard input
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord('q'):
+                    print("Quitting...")
+                    break
+                elif key == ord('r'):
+                    print("Resetting tracking...")
+                    self.reset()
+                
+                frame_count += 1
+                
+        except KeyboardInterrupt:
+            print("Interrupted by user")
+        
+        finally:
+            # Cleanup
+            pipeline.stop()
+            cv2.destroyAllWindows()
+            if writer is not None:
+                writer.release()
+            
+            print(f"Processed {frame_count} frames from RealSense")
+            self._save_results(output_path)
     
     def _draw_pose_axes(self, image: np.ndarray, pose: np.ndarray, 
                        length: float = 0.1) -> np.ndarray:
@@ -400,7 +521,7 @@ def main():
     pipeline = FoundationPosePipeline(args.config)
     
     if args.realsense:
-        pipeline.process_realsense()
+        pipeline.process_realsense(args.output)
     elif args.video:
         pipeline.process_video(args.video, args.output)
     else:
