@@ -43,7 +43,8 @@ class FoundationPoseWrapper:
     """
     
     def __init__(self, model_path: Optional[str] = None, device: str = "cuda", 
-                 enable_domain_bridge: bool = True, bridge_profile: str = "metal_lowres"):
+                 enable_domain_bridge: bool = True, bridge_profile: str = "metal_lowres",
+                 enable_ref_matching: bool = True, cuda_memory_fraction: float = 0.8):
         """
         Initialize FoundationPose wrapper.
         
@@ -52,21 +53,33 @@ class FoundationPoseWrapper:
             device: Device to run on ("cuda" or "cpu")
             enable_domain_bridge: Whether to apply domain gap bridging
             bridge_profile: Domain bridging profile ("metal_lowres", "indoor", "outdoor")
+            enable_ref_matching: Whether to enable reference matching (expensive)
+            cuda_memory_fraction: GPU memory allocation fraction
         """
         self.device = device
         self.model_path = model_path
         self.refs_bundle = None
         self.is_initialized = False
         
-        # Domain bridging settings
+        # Feature control settings
         self.enable_domain_bridge = enable_domain_bridge
         self.bridge_profile = bridge_profile
+        self.enable_ref_matching = enable_ref_matching
+        
+        # CUDA optimization
+        self.cuda_memory_fraction = cuda_memory_fraction
+        if device == "cuda" and torch is not None:
+            torch.cuda.set_per_process_memory_fraction(cuda_memory_fraction)
+            if torch.cuda.is_available():
+                torch.backends.cudnn.benchmark = True  # Optimize for fixed input sizes
+                print(f"CUDA optimization: memory_fraction={cuda_memory_fraction}, cudnn_benchmark=True")
         
         # Tracking state
         self.last_pose = None
         self.track_history = []
         
         print(f"FoundationPose wrapper initialized on {device}")
+        print(f"Reference matching: {'ON' if enable_ref_matching else 'OFF'}")
         print(f"Domain bridge: {'ON' if enable_domain_bridge else 'OFF'} (profile: {bridge_profile})")
     
     def load_refs_bundle(self, refs_dir: str, K: np.ndarray, depth_scale: float = 0.001) -> RefsBundle:
@@ -227,18 +240,26 @@ class FoundationPoseWrapper:
         if len(self.refs_bundle.images) == 0:
             raise RuntimeError("No reference images available")
         
-        # Simplified initialization: find best matching reference
-        # In practice, this would use feature matching or template matching
-        best_match_idx = self._find_best_reference(rgb, mask)
+        # Skip expensive reference matching if disabled
+        if not self.enable_ref_matching:
+            print("[Init] Reference matching disabled - skipping to geometric initialization")
+            best_match_idx = None
+        else:
+            print("[Init] Reference matching enabled - searching through references...")
+            # Simplified initialization: find best matching reference
+            # In practice, this would use feature matching or template matching
+            best_match_idx = self._find_best_reference(rgb, mask)
         
         if best_match_idx is None:
-            print("Warning: No suitable reference match found")
-            return None
-        
-        print(f"[Init] Found best match: ref[{best_match_idx}]")
+            if self.enable_ref_matching:
+                print("Warning: No suitable reference match found")
+            # Skip to geometric initialization
+        else:
+            print(f"[Init] Found best match: ref[{best_match_idx}]")
         
         # Use reference pose if available, otherwise estimate from matching
-        if (self.refs_bundle.poses is not None and 
+        if (best_match_idx is not None and
+            self.refs_bundle.poses is not None and 
             best_match_idx < len(self.refs_bundle.poses)):
             initial_pose = self.refs_bundle.poses[best_match_idx].copy()
             print(f"[Init] Using pre-computed reference pose")

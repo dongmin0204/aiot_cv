@@ -163,7 +163,9 @@ class FoundationPosePipeline:
             model_path=fp_config['model_path'],
             device=fp_config['device'],
             enable_domain_bridge=fp_config.get('enable_domain_bridge', True),
-            bridge_profile=fp_config.get('bridge_profile', 'metal_lowres')
+            bridge_profile=fp_config.get('bridge_profile', 'metal_lowres'),
+            enable_ref_matching=fp_config.get('enable_ref_matching', True),
+            cuda_memory_fraction=fp_config.get('cuda_memory_fraction', 0.8)
         )
         
         # Load reference bundle

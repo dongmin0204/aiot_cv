@@ -6,8 +6,11 @@ yolo:
 foundationpose:
   device: cuda
   model_path: null  # Model-free mode
-  enable_domain_bridge: true  # Domain gap bridging
+  enable_domain_bridge: false  # Domain gap bridging (disabled for speed)
   bridge_profile: "metal_lowres"  # "metal_lowres", "indoor", "outdoor"
+  enable_ref_matching: false  # Disable expensive reference matching
+  cuda_memory_fraction: 0.8  # GPU memory allocation
+  batch_size: 1  # Batch processing for GPU efficiency
 
 smoothing:
   window_size: 5

@@ -8,8 +8,16 @@ import numpy as np
 from typing import Optional, Tuple, Any
 import logging
 
+try:
+    import torch
+    import torch.nn.functional as F
+    TORCH_AVAILABLE = True
+except ImportError:
+    TORCH_AVAILABLE = False
 
-def backproject_points(depth: np.ndarray, mask: np.ndarray, K: np.ndarray) -> np.ndarray:
+
+def backproject_points(depth: np.ndarray, mask: np.ndarray, K: np.ndarray, 
+                      use_gpu: bool = True) -> np.ndarray:
     """
     Backproject masked depth pixels to 3D points.
     
@@ -17,10 +25,19 @@ def backproject_points(depth: np.ndarray, mask: np.ndarray, K: np.ndarray) -> np
         depth: Depth image in meters
         mask: Binary mask (255=object, 0=background)
         K: Camera intrinsics matrix (3x3)
+        use_gpu: Whether to use GPU acceleration
         
     Returns:
         3D points array (N, 3)
     """
+    if use_gpu and TORCH_AVAILABLE and torch.cuda.is_available():
+        return _backproject_points_gpu(depth, mask, K)
+    else:
+        return _backproject_points_cpu(depth, mask, K)
+
+
+def _backproject_points_cpu(depth: np.ndarray, mask: np.ndarray, K: np.ndarray) -> np.ndarray:
+    """CPU version of backprojection."""
     fy, fx = K[1, 1], K[0, 0]
     cy, cx = K[1, 2], K[0, 2]
     
@@ -39,6 +56,40 @@ def backproject_points(depth: np.ndarray, mask: np.ndarray, K: np.ndarray) -> np
     X = (xs - cx) * z / fx
     Y = (ys - cy) * z / fy
     pts = np.stack([X, Y, z], axis=1)
+    
+    return pts
+
+
+def _backproject_points_gpu(depth: np.ndarray, mask: np.ndarray, K: np.ndarray) -> np.ndarray:
+    """GPU-accelerated version of backprojection."""
+    # Convert to tensors
+    depth_tensor = torch.from_numpy(depth).cuda().float()
+    mask_tensor = torch.from_numpy(mask).cuda()
+    
+    # Get mask coordinates
+    ys, xs = torch.where(mask_tensor > 0)
+    if len(xs) == 0:
+        return np.empty((0, 3))
+    
+    z = depth_tensor[ys, xs]
+    
+    # Filter valid depth
+    valid = (z > 0) & torch.isfinite(z)
+    xs, ys, z = xs[valid].float(), ys[valid].float(), z[valid]
+    
+    if len(xs) == 0:
+        return np.empty((0, 3))
+    
+    # Camera parameters
+    fx, fy, cx, cy = K[0, 0], K[1, 1], K[0, 2], K[1, 2]
+    
+    # Backproject to 3D on GPU
+    X = (xs - cx) * z / fx
+    Y = (ys - cy) * z / fy
+    
+    # Stack and convert back to numpy
+    pts_tensor = torch.stack([X, Y, z], dim=1)
+    pts = pts_tensor.cpu().numpy()
     
     return pts
 
