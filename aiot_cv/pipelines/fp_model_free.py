@@ -381,79 +381,7 @@ class FoundationPosePipeline:
             if pose is None:
                 self.init_cooldown_until = now + 0.2  # 200ms cooldown
             
-            # Fallback: Coarse initialization from point cloud if reference matching fails
-            if pose is None and roi_depth is not None and mask is not None:
-                print("[Fallback] Attempting coarse initialization from point cloud...")
-                
-                # Debug: Check valid depth points
-                valid = (roi_depth > 0)
-                if mask is not None:
-                    valid = valid & mask
-                nz = int(valid.sum())
-                print(f"[Debug] Valid depth points in ROI: {nz}")
-                
-                if nz < 500:
-                    print(f"[Fallback] Insufficient valid points ({nz} < 500)")
-                    return self.current_pose
-                
-                try:
-                    # Generate point cloud from depth and mask
-                    from aiot_cv.src.pc.pointcloud import rgbd_to_pcl, filter_pointcloud
-                    pcl = rgbd_to_pcl(roi_rgb, roi_depth, self.K, self.depth_scale, mask)
-                    
-                    # 1) Normalize return type: Convert to Nx3 np.ndarray
-                    def to_xyz(arr):
-                        if arr is None:
-                            return None
-                        if isinstance(arr, dict):
-                            arr = arr.get('points', None)
-                        elif isinstance(arr, (list, tuple)):
-                            # Common pattern: (points, colors, normals) or (points, )
-                            arr = arr[0] if len(arr) > 0 else None
-                        if arr is None:
-                            return None
-                        arr = np.asarray(arr)
-                        # If (3,N) shape, transpose to (N,3)
-                        if arr.ndim == 2 and arr.shape[0] == 3 and arr.shape[1] != 3:
-                            arr = arr.T
-                        return arr
-
-                    pcl = to_xyz(pcl)
-                    print(f"[Debug] raw pcl type/shape:", type(pcl), getattr(pcl, 'shape', None))
-                    
-                    if pcl is None or pcl.size == 0 or pcl.ndim != 2 or pcl.shape[1] != 3:
-                        print(f"[Fallback] Invalid raw PCL shape: {None if pcl is None else pcl.shape}")
-                        raise ValueError("empty/invalid pcl after rgbd_to_pcl")
-
-                    # 2) Apply filter (normalize return again)
-                    pcl_f = filter_pointcloud(pcl)
-                    pcl_f = to_xyz(pcl_f) or pcl  # If filter returns invalid, keep original
-
-                    if pcl_f.ndim != 2 or pcl_f.shape[1] != 3:
-                        print(f"[Fallback] Filter returned unexpected shape {pcl_f.shape}, using raw pcl")
-                        pcl_f = pcl
-
-                    n = pcl_f.shape[0]
-                    print(f"[Debug] PCL after filtering -> shape: {pcl_f.shape}")
-                    print(f"[Debug] filtered pcl type/shape:", type(pcl_f), getattr(pcl_f, 'shape', None))
-                    
-                    if n < 100:  # Adjust threshold as needed
-                        print("[Fallback] Insufficient points after filtering")
-                        return self.current_pose
-
-                    # 3) Very simple initialization: R=I, t=centroid (stability first)
-                    centroid = pcl_f.mean(axis=0)
-                    pose = np.eye(4, dtype=np.float64)
-                    pose[:3, 3] = centroid
-                    
-                    print(f"[Fallback] Coarse pose initialized from {n} points (centroid: {centroid})")
-                    return pose
-
-                except Exception as e:
-                    print(f"[Fallback] Coarse init failed robustly: {e}")
-                    import traceback
-                    traceback.print_exc()
-                    return self.current_pose
+            # Note: Old PCL fallback removed - now handled in FoundationPose wrapper with PCA+ICP
         else:
             # Track pose
             print("Tracking pose...")
@@ -678,17 +606,35 @@ class FoundationPosePipeline:
                 # Process frame through pipeline
                 pose = self.process_frame(color_image, depth_image)
                 
-                # Draw visualization
+                # Draw visualization with detailed status
                 if pose is not None:
                     color_image = self._draw_pose_axes(color_image, pose)
-                    # Draw info text
+                    # Draw status text
                     cv2.putText(color_image, f"Frame: {frame_count}", (10, 30), 
-                               cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-                    cv2.putText(color_image, "Pose: OK", (10, 70), 
-                               cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                    cv2.putText(color_image, "POSE OK", (10, 60), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                    
+                    # Add pose info
+                    t = pose[:3, 3]
+                    cv2.putText(color_image, f"Z: {t[2]:.2f}m", (10, 90), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
                 else:
-                    cv2.putText(color_image, "No pose", (10, 70), 
-                               cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+                    # Determine failure reason for better debugging
+                    reason = "UNKNOWN"
+                    if not hasattr(self, 'last_detection') or self.last_detection is None:
+                        reason = "NO_DETECTION"
+                    elif not mask_valid:
+                        reason = "MASK_TOO_SMALL"
+                    elif not depth_valid:
+                        reason = "POOR_DEPTH"
+                    else:
+                        reason = "REF_MATCH_FAIL"
+                    
+                    cv2.putText(color_image, f"Frame: {frame_count}", (10, 30), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                    cv2.putText(color_image, f"NO POSE [{reason}]", (10, 60), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
                 
                 # Write output frame
                 if writer is not None:

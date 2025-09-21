@@ -252,13 +252,60 @@ class FoundationPoseWrapper:
                 self.last_pose = initial_pose
                 self.is_initialized = True
                 print(f"[Init] Successfully initialized from reference {best_match_idx}")
+                return initial_pose
             else:
-                print(f"[Init] Invalid pose detected, returning None")
-                return None
+                print(f"[Init] Invalid pose detected, trying PCA+ICP fallback")
+                initial_pose = None
         else:
-            print(f"[Init] Pose estimation failed")
+            print(f"[Init] Reference matching failed, trying PCA+ICP fallback")
         
-        return initial_pose
+        # Fallback: PCA + ICP initialization
+        if initial_pose is None and depth is not None and mask is not None:
+            print("[Fallback] Attempting PCA + ICP initialization...")
+            
+            # Generate PCA-based initial poses
+            pca_poses = self._pca_init_from_mask(depth, mask, self.refs_bundle.K, self.refs_bundle.depth_scale)
+            
+            if len(pca_poses) > 0:
+                # Convert depth to point cloud
+                depth_m = depth.astype(np.float32) * self.refs_bundle.depth_scale
+                mask_binary = (mask > 0).astype(np.uint8)
+                
+                # Get valid points
+                ys, xs = np.where(mask_binary > 0)
+                z = depth_m[ys, xs]
+                valid = np.isfinite(z) & (z > 0.01) & (z < 2.0)
+                xs, ys, z = xs[valid], ys[valid], z[valid]
+                
+                if len(xs) >= 100:
+                    # Backproject to 3D
+                    fx, fy, cx, cy = self.refs_bundle.K[0, 0], self.refs_bundle.K[1, 1], self.refs_bundle.K[0, 2], self.refs_bundle.K[1, 2]
+                    X = (xs - cx) * z / fx
+                    Y = (ys - cy) * z / fy
+                    source_points = np.stack([X, Y, z], axis=1)
+                    
+                    # Try ICP refinement
+                    refined_pose = self._icp_refine_pose(source_points, pca_poses)
+                    
+                    if refined_pose is not None:
+                        self.last_pose = refined_pose
+                        self.is_initialized = True
+                        print("[Fallback] Successfully initialized using PCA + ICP")
+                        return refined_pose
+                    else:
+                        # Use best PCA pose as last resort
+                        best_pca = pca_poses[0]  # First candidate is usually best
+                        self.last_pose = best_pca
+                        self.is_initialized = True
+                        print("[Fallback] Using PCA pose (ICP failed)")
+                        return best_pca
+                else:
+                    print(f"[Fallback] Insufficient points for ICP: {len(xs)} < 100")
+            else:
+                print("[Fallback] PCA initialization failed")
+        
+        print("[Init] All initialization methods failed")
+        return None
     
     def track(self, rgb: np.ndarray, depth: Optional[np.ndarray] = None,
               mask: Optional[np.ndarray] = None) -> Optional[np.ndarray]:
@@ -366,16 +413,17 @@ class FoundationPoseWrapper:
         else:
             adaptive_thr = 0.2  # fallback
         
-        # Margin validation (best vs second best)
-        margin_delta = 0.05
+        # Margin validation (best vs second best) - relaxed for thin objects
+        margin_delta = 0.03  # Reduced from 0.05 to 0.03 for thin objects
         if len(scores_sorted) >= 2:
             best_score, second_best = scores_sorted[0], scores_sorted[1]
             margin_ok = (best_score - second_best) >= margin_delta
         else:
             margin_ok = True  # only one reference
         
-        # Combined validation
-        valid_by_adaptive = (best_score >= adaptive_thr) and margin_ok
+        # Combined validation - more lenient for thin objects
+        basic_threshold = max(0.12, adaptive_thr * 0.8)  # Lower floor, 80% of adaptive
+        valid_by_adaptive = (best_score >= basic_threshold) and margin_ok
         
         # Log detailed matching scores
         print(f"[RefMatch] N={len(self.refs_bundle.images)} | best={best_score:.3f} (δ={best_score-scores_sorted[1] if len(scores_sorted)>1 else 0:.3f}) | thr={adaptive_thr:.2f} | valid={valid_by_adaptive}")
@@ -532,6 +580,157 @@ class FoundationPoseWrapper:
             print("[PoseEst] No depth/mask available, using identity pose")
         
         return pose
+    
+    def _pca_init_from_mask(self, depth: np.ndarray, mask: np.ndarray, K: np.ndarray, 
+                           depth_scale: float) -> List[np.ndarray]:
+        """Generate PCA-based initial poses from depth mask."""
+        # Get mask coordinates
+        ys, xs = np.where(mask > 0)
+        if len(xs) < 500:
+            print(f"[PCA] Insufficient mask pixels: {len(xs)} < 500")
+            return []
+        
+        # Get depth values
+        depth_m = depth.astype(np.float32) * depth_scale
+        z = depth_m[ys, xs]
+        valid = np.isfinite(z) & (z > 0.01) & (z < 2.0)  # 1cm to 2m range
+        xs, ys, z = xs[valid], ys[valid], z[valid]
+        
+        if len(xs) < 500:
+            print(f"[PCA] Insufficient valid depth points: {len(xs)} < 500")
+            return []
+        
+        # Backproject to 3D
+        fx, fy, cx, cy = K[0, 0], K[1, 1], K[0, 2], K[1, 2]
+        X = (xs - cx) * z / fx
+        Y = (ys - cy) * z / fy
+        pts = np.stack([X, Y, z], axis=1)
+        
+        # PCA analysis
+        center = pts.mean(axis=0)
+        centered = pts - center
+        U, S, Vt = np.linalg.svd(centered, full_matrices=False)
+        
+        # Principal components (rows of Vt)
+        a1 = Vt[0]  # Primary axis (longest dimension)
+        a2 = Vt[1]  # Secondary axis
+        a3 = Vt[2]  # Tertiary axis
+        
+        # Ensure right-handed coordinate system
+        if np.linalg.det(np.column_stack([a1, a2, a3])) < 0:
+            a3 = -a3
+        
+        # Create rotation matrix (object frame)
+        R = np.column_stack([a1, a2, a3])
+        
+        # For symmetric objects like screwdrivers, create multiple candidates
+        # 1. Standard orientation
+        T1 = np.eye(4, dtype=np.float64)
+        T1[:3, :3] = R
+        T1[:3, 3] = center
+        
+        # 2. Flipped along primary axis (180° rotation)
+        R_flip = R @ np.diag([-1, -1, 1])
+        T2 = np.eye(4, dtype=np.float64)
+        T2[:3, :3] = R_flip
+        T2[:3, 3] = center
+        
+        # 3. Alternative orientation (primary <-> secondary axes swapped)
+        R_alt = np.column_stack([a2, a1, a3])
+        if np.linalg.det(R_alt) < 0:
+            R_alt[:, 2] = -R_alt[:, 2]
+        T3 = np.eye(4, dtype=np.float64)
+        T3[:3, :3] = R_alt
+        T3[:3, 3] = center
+        
+        variance_explained = S / S.sum()
+        print(f"[PCA] Generated 3 pose candidates from {len(pts)} points")
+        print(f"[PCA] Variance explained: {variance_explained[0]:.2f}, {variance_explained[1]:.2f}, {variance_explained[2]:.2f}")
+        print(f"[PCA] Object dimensions (m): {S[0]:.3f} x {S[1]:.3f} x {S[2]:.3f}")
+        
+        return [T1, T2, T3]
+    
+    def _icp_refine_pose(self, source_points: np.ndarray, init_poses: List[np.ndarray], 
+                        voxel_size: float = 0.004, max_correspondence: float = 0.01) -> Optional[np.ndarray]:
+        """Refine pose using ICP with multiple initial guesses."""
+        try:
+            import open3d as o3d
+        except ImportError:
+            print("[ICP] Open3D not available, skipping ICP refinement")
+            return None
+        
+        if len(source_points) < 100:
+            print(f"[ICP] Insufficient source points: {len(source_points)} < 100")
+            return None
+        
+        # Create source point cloud
+        source_pcd = o3d.geometry.PointCloud()
+        source_pcd.points = o3d.utility.Vector3dVector(source_points)
+        source_pcd = source_pcd.voxel_down_sample(voxel_size)
+        source_pcd.estimate_normals(
+            o3d.geometry.KDTreeSearchParamHybrid(radius=0.02, max_nn=30)
+        )
+        
+        # For now, use a simple target (cylinder or box) as placeholder
+        # In practice, this would be loaded from reference CAD or point cloud
+        target_pcd = self._create_reference_geometry()
+        if target_pcd is None:
+            print("[ICP] No reference geometry available")
+            return None
+        
+        target_pcd = target_pcd.voxel_down_sample(voxel_size)
+        target_pcd.estimate_normals(
+            o3d.geometry.KDTreeSearchParamHybrid(radius=0.02, max_nn=30)
+        )
+        
+        best_result = None
+        best_fitness = 0.0
+        
+        print(f"[ICP] Testing {len(init_poses)} initial poses")
+        
+        for i, init_pose in enumerate(init_poses):
+            try:
+                # Run ICP
+                result = o3d.pipelines.registration.registration_icp(
+                    source_pcd, target_pcd, max_correspondence, init_pose,
+                    o3d.pipelines.registration.TransformationEstimationPointToPlane(),
+                    o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=60)
+                )
+                
+                print(f"[ICP] Init {i}: fitness={result.fitness:.3f}, rmse={result.inlier_rmse:.4f}")
+                
+                # Quality thresholds for thin objects (relaxed)
+                if result.fitness > 0.55 and result.inlier_rmse < 0.010:
+                    if result.fitness > best_fitness:
+                        best_result = result
+                        best_fitness = result.fitness
+                        
+            except Exception as e:
+                print(f"[ICP] Init {i} failed: {e}")
+                continue
+        
+        if best_result is not None:
+            print(f"[ICP] Success: fitness={best_result.fitness:.3f}, rmse={best_result.inlier_rmse:.4f}")
+            return best_result.transformation
+        else:
+            print("[ICP] All attempts failed quality thresholds")
+            return None
+    
+    def _create_reference_geometry(self) -> Optional:
+        """Create reference geometry for ICP. Placeholder implementation."""
+        try:
+            import open3d as o3d
+        except ImportError:
+            return None
+        
+        # Simple cylinder approximation for screwdriver
+        # In practice, load actual CAD model or reference point cloud
+        cylinder = o3d.geometry.TriangleMesh.create_cylinder(radius=0.005, height=0.15)
+        cylinder.translate([0, 0, -0.075])  # Center at origin
+        
+        # Convert to point cloud
+        pcd = cylinder.sample_points_poisson_disk(2000)
+        return pcd
     
     def _simple_tracking(self, rgb: np.ndarray, depth: Optional[np.ndarray],
                         mask: Optional[np.ndarray]) -> Optional[np.ndarray]:
