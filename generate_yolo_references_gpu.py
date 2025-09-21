@@ -35,42 +35,23 @@ def generate_yolo_references():
     model = YOLO(yolo_weights)
     model.to(device)
     
-    # Get screwdriver images
-    screwdriver_images = [
-        "1-combination-screwdriver-set-shafiq-internatonal-original-imag6yk3uzedgskt_jpeg.rf.66b645ae0f4e8fe9d1e1a2244fc869f2.jpg",
-        "1-combination-screwdriver-set-shafiq-internatonal-original-imag6yk3uzedgskt_jpeg.rf.9b995cfd7e7707ea3f4b3844b41d1a81.jpg",
-        "1-combination-screwdriver-set-shafiq-internatonal-original-imag6yk3uzedgskt_jpeg.rf.ec09c860be97341d516df165a84fe9b4.jpg",
-        "1621-8-cutting-plier-and-831-screwdriver-set-taparia-original-imafgj9gm8rceccg_jpeg.rf.47745379f002f7bc9651779a4a3003dd.jpg",
-        "1621-8-cutting-plier-and-831-screwdriver-set-taparia-original-imafgj9gm8rceccg_jpeg.rf.4953ccdc1b41bbef51ff9df4a2b82892.jpg",
-        "1621-8-cutting-plier-and-831-screwdriver-set-taparia-original-imafgj9gm8rceccg_jpeg.rf.abef03510ab376eaa3dc95e68a2d8edc.jpg",
-        "8-set-of-2-starter-kit-screwdriver-2in1-8inch-pliers-hand-tool-original-imag4q3tbgyr2efz_jpeg.rf.22fe99499f567c476b7ffa30a65c6e18.jpg",
-        "8-set-of-2-starter-kit-screwdriver-2in1-8inch-pliers-hand-tool-original-imag4q3tbgyr2efz_jpeg.rf.981472097a60cb990243d908efe8afd4.jpg",
-        "8-set-of-2-starter-kit-screwdriver-2in1-8inch-pliers-hand-tool-original-imag4q3tbgyr2efz_jpeg.rf.a2bab99ac678dd72c0b755491cbafadb.jpg",
-        "Screwdriver-415-_JPEG.rf.05fe524fe035e48dae8a9542f3ac9033.jpg",
-        "Screwdriver-415-_JPEG.rf.1a8c31ccd7b0ff7f63c582546b01f044.jpg",
-        "Screwdriver-415-_JPEG.rf.cc75490616f138aa51f1755d4f88856c.jpg",
-        "Screwdriver-456-_JPEG.rf.00a0d4abe5fe9f3ccd74ca612769be81.jpg",
-        "Screwdriver-456-_JPEG.rf.22c174a60702204eb1b17f465cffa93b.jpg",
-        "Screwdriver-456-_JPEG.rf.5918bda8849b749d85eef64dbbfcce52.jpg",
-        "Screwdriver-465-_JPEG.rf.23dfe0ce352772d8b534e0dc638ba9b5.jpg",
-        "Screwdriver-465-_JPEG.rf.3a64e777eb9df17f80718a295da4199b.jpg",
-        "Screwdriver-465-_JPEG.rf.4cf6f380e68dfda5036945bb0f1d288c.jpg",
-        "Screwdriver-477-_JPEG.rf.6312d94798555218b5d2766fbd5679bb.jpg",
-        "Screwdriver-477-_JPEG.rf.99772baa0a5774bf5ecdac3ea4c05b8f.jpg"
-    ]
+    # Get reference images (ref_01.png ~ ref_44.png)
+    ref_images = []
+    for i in range(1, 45):  # ref_01.png to ref_44.png
+        ref_images.append(f"ref_{i:02d}.png")
     
-    print(f"Processing {len(screwdriver_images)} screwdriver images")
+    print(f"Processing {len(ref_images)} reference images")
     
     successful_count = 0
     
-    for i, img_file in enumerate(screwdriver_images):
-        img_path = os.path.join(train_images_dir, img_file)
+    for i, img_file in enumerate(ref_images):
+        img_path = os.path.join(output_dir, img_file)
         
         if not os.path.exists(img_path):
             print(f"Warning: Image not found: {img_path}")
             continue
         
-        print(f"Processing {i+1}/{len(screwdriver_images)}: {img_file}")
+        print(f"Processing {i+1}/{len(ref_images)}: {img_file}")
         
         try:
             # Load image using PIL
@@ -111,22 +92,15 @@ def generate_yolo_references():
                 # Convert to binary mask (0/255)
                 mask_binary = (mask_resized > 0.5).astype(np.uint8) * 255
                 
-                # Generate output filenames
-                ref_num = i + 1
-                ref_img_name = f"ref_{ref_num:02d}.png"
-                ref_mask_name = f"ref_{ref_num:02d}_mask.png"
-                
-                ref_img_path = os.path.join(output_dir, ref_img_name)
+                # Generate output filename for mask
+                ref_mask_name = f"ref_{i+1:02d}_mask.png"
                 ref_mask_path = os.path.join(output_dir, ref_mask_name)
                 
-                # Save reference image (RGB format)
-                image.save(ref_img_path)
-                
-                # Save mask
+                # Save mask (reference image is already saved)
                 mask_image = Image.fromarray(mask_binary, mode='L')
                 mask_image.save(ref_mask_path)
                 
-                print(f"  -> Saved: {ref_img_name}, {ref_mask_name} (conf: {best_conf:.3f})")
+                print(f"  -> Saved: {ref_mask_name} (conf: {best_conf:.3f})")
                 successful_count += 1
             else:
                 print(f"  -> No screwdriver detection found")
@@ -135,20 +109,20 @@ def generate_yolo_references():
             print(f"  -> Error processing {img_file}: {e}")
             continue
     
-    print(f"\n✅ Successfully generated {successful_count} reference image pairs")
+    print(f"\n✅ Successfully generated {successful_count} mask files")
     print(f"Output directory: {output_dir}")
     
-    # List generated files
+    # List generated mask files
     if os.path.exists(output_dir):
-        files = sorted(os.listdir(output_dir))
-        print(f"Generated files: {len(files)}")
-        for f in files:
+        mask_files = [f for f in sorted(os.listdir(output_dir)) if f.endswith('_mask.png')]
+        print(f"Generated mask files: {len(mask_files)}")
+        for f in mask_files:
             print(f"  - {f}")
 
 def main():
-    print("Generating reference images and masks using YOLO GPU segmentation...")
+    print("Generating masks for reference images using YOLO GPU segmentation...")
     generate_yolo_references()
-    print("\n✅ Reference generation completed!")
+    print("\n✅ Mask generation completed!")
 
 if __name__ == "__main__":
     main()
