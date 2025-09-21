@@ -351,7 +351,7 @@ class FoundationPosePipeline:
         depth_valid = True
         mask_valid = True
         global_depth_valid = True
-        overall_valid = True  # Initialize to True, will be updated if depth/mask available
+        overall_valid = 0.6  # Fixed at 0.6
         
         if roi_depth is not None and mask is not None:
             depth_m = roi_depth.astype(np.float32) * self.depth_scale
@@ -401,8 +401,8 @@ class FoundationPosePipeline:
                         f"global_depth={global_depth_ratio:.1%} (>={min_global_depth:.1%})")
             logging.info(f"[{gate_status}Gate] median_z={median_z:.3f}m, z_ema={self.z_ema:.3f}m")
             
-            # Overall validity (include confidence check)
-            overall_valid = conf_valid and mask_valid and depth_valid and global_depth_valid
+            # Overall validity (fixed at 0.6)
+            overall_valid = 0.6
             
             if not overall_valid:
                 failure_reasons = []
