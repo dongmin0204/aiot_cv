@@ -158,9 +158,12 @@ class FoundationPosePipeline:
         print("YOLO detector initialized")
         
         # Initialize FoundationPose wrapper
+        fp_config = self.config['foundationpose']
         self.fp_wrapper = FoundationPoseWrapper(
-            model_path=self.config['foundationpose']['model_path'],
-            device=self.config['foundationpose']['device']
+            model_path=fp_config['model_path'],
+            device=fp_config['device'],
+            enable_domain_bridge=fp_config.get('enable_domain_bridge', True),
+            bridge_profile=fp_config.get('bridge_profile', 'metal_lowres')
         )
         
         # Load reference bundle

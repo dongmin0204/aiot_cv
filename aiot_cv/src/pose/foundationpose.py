@@ -9,6 +9,8 @@ import numpy as np
 import cv2
 from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass
+from .domain_bridge import apply_domain_bridge
+from .axis_estimation import estimate_axis_from_depth
 
 try:
     import torch
@@ -40,24 +42,32 @@ class FoundationPoseWrapper:
     - Reinitialization capabilities
     """
     
-    def __init__(self, model_path: Optional[str] = None, device: str = "cuda"):
+    def __init__(self, model_path: Optional[str] = None, device: str = "cuda", 
+                 enable_domain_bridge: bool = True, bridge_profile: str = "metal_lowres"):
         """
         Initialize FoundationPose wrapper.
         
         Args:
             model_path: Path to FoundationPose model weights (optional for model-free)
             device: Device to run on ("cuda" or "cpu")
+            enable_domain_bridge: Whether to apply domain gap bridging
+            bridge_profile: Domain bridging profile ("metal_lowres", "indoor", "outdoor")
         """
         self.device = device
         self.model_path = model_path
         self.refs_bundle = None
         self.is_initialized = False
         
+        # Domain bridging settings
+        self.enable_domain_bridge = enable_domain_bridge
+        self.bridge_profile = bridge_profile
+        
         # Tracking state
         self.last_pose = None
         self.track_history = []
         
         print(f"FoundationPose wrapper initialized on {device}")
+        print(f"Domain bridge: {'ON' if enable_domain_bridge else 'OFF'} (profile: {bridge_profile})")
     
     def load_refs_bundle(self, refs_dir: str, K: np.ndarray, depth_scale: float = 0.001) -> RefsBundle:
         """
@@ -304,7 +314,34 @@ class FoundationPoseWrapper:
             else:
                 print("[Fallback] PCA initialization failed")
         
-        print("[Init] All initialization methods failed")
+        # Final fallback: Axis-only estimation
+        print("[Fallback] Attempting axis-only estimation...")
+        axis_result = estimate_axis_from_depth(
+            depth.astype(np.float32) * self.refs_bundle.depth_scale,
+            mask.astype(np.uint8),
+            self.refs_bundle.K
+        )
+        
+        if axis_result is not None:
+            origin, axis_dir, num_inliers, stats = axis_result
+            
+            # Create a simple pose from axis (identity rotation + centroid translation)
+            axis_pose = np.eye(4, dtype=np.float64)
+            axis_pose[:3, 3] = origin
+            
+            # Log axis information
+            print(f"[AxisOnly] Origin: {origin}")
+            print(f"[AxisOnly] Direction: {axis_dir}")
+            print(f"[AxisOnly] Inliers: {num_inliers}")
+            print(f"[AxisOnly] Stats: {stats}")
+            
+            # Store as partial initialization
+            self.last_pose = axis_pose
+            self.is_initialized = True
+            print("[AxisOnly] Axis-based initialization successful (5DoF, roll undefined)")
+            return axis_pose
+        
+        print("[Init] All initialization methods failed (including axis estimation)")
         return None
     
     def track(self, rgb: np.ndarray, depth: Optional[np.ndarray] = None,
@@ -381,8 +418,11 @@ class FoundationPoseWrapper:
             ref_name = self.refs_bundle.names[i] if i < len(self.refs_bundle.names) else f"ref_{i}"
             print(f"[RefMatch] Testing {ref_name} ({i+1}/{len(self.refs_bundle.images)})")
             
-            # Apply same preprocessing to reference
-            ref_preprocessed = self._preprocess_for_matching(ref_img, self.refs_bundle.masks[i], use_clahe=True)
+            # Apply same preprocessing to reference with optional domain bridging
+            ref_img_processed = ref_img
+            if self.enable_domain_bridge:
+                ref_img_processed = apply_domain_bridge(ref_img, self.bridge_profile)
+            ref_preprocessed = self._preprocess_for_matching(ref_img_processed, self.refs_bundle.masks[i], use_clahe=True)
             
             # Convert to grayscale for feature detection
             query_gray = cv2.cvtColor(query_preprocessed, cv2.COLOR_RGB2GRAY)
