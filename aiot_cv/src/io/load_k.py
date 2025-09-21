@@ -30,7 +30,7 @@ def load_K(path):
 	- If extended: choose color/depth by align_to_color flag, return K and depth scale.
 	- If minimal: expects fx,fy,cx,cy,depth_scale.
 	"""
-	cfg = yaml.safe_load(open(path, 'r'))
+	cfg = yaml.safe_load(open(path, 'r',encoding='utf-8'))
 	if 'intrinsics' in cfg:  # extended schema
 		intr = cfg['intrinsics']['color'] if cfg.get('align_to_color', True) else cfg['intrinsics']['depth']
 		fx, fy, cx, cy = float(intr['fx']), float(intr['fy']), float(intr['cx']), float(intr['cy'])
