@@ -1,6 +1,6 @@
 # aiot_cv: FoundationPose Model-Free Pipeline
 
-YOLOv8-seg → ROI → RGB-D → 6DoF 포즈 추정까지 수행하는 FoundationPose 기반 end-to-end 파이프라인입니다. CAD 없이 레퍼런스 이미지 기반(few-shot)으로 동작하며, 실시간 추적과 포즈 스무딩을 지원합니다.
+YOLOv8-seg => ROI => RGB-D => 6DoF 포즈 추정까지 수행하는 FoundationPose 기반 end-to-end 파이프라인입니다. CAD 없이 레퍼런스 이미지 기반(few-shot)으로 동작하며, 실시간 추적과 포즈 스무딩을 지원합니다.
 
 ## 🎯 주요 기능
 
@@ -36,7 +36,7 @@ aiot_cv/
 
 ## ⚙️ 설정
 
-### 1) 카메라 내참 (`configs/camera.yaml`)
+### 1) 카메라 내부 정보 (`configs/camera.yaml`)
 
 확장 스키마를 사용하여 해상도, 정렬, 왜곡, 외부참조계를 모두 포함:
 
