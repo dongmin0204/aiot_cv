@@ -313,8 +313,10 @@ class FoundationPosePipeline:
             # Initialize pose from reference images
             logging.info("Initializing pose from references...")
             
-            # Check depth validity before attempting reference initialization
+            # Quality gating: Check depth and mask quality before attempting initialization
             depth_valid = True
+            mask_valid = True
+            
             if roi_depth is not None and mask is not None:
                 depth_m = roi_depth.astype(np.float32) * self.depth_scale
                 mask_binary = (mask > 0).astype(np.uint8)
@@ -323,15 +325,27 @@ class FoundationPosePipeline:
                 
                 total_mask_pixels = int((mask_binary > 0).sum())
                 valid_depth_pixels = int(valid_in_mask.sum())
-                ratio = valid_depth_pixels / total_mask_pixels if total_mask_pixels > 0 else 0.0
+                total_frame_pixels = roi_depth.size
+                
+                # Quality metrics
+                depth_ratio = valid_depth_pixels / total_mask_pixels if total_mask_pixels > 0 else 0.0
+                mask_area_ratio = total_mask_pixels / total_frame_pixels
                 median_z = float(np.median(depth_m[valid_in_mask])) if valid_depth_pixels > 0 else 0.0
                 
-                # Minimum requirements for reference initialization
-                depth_valid = (ratio >= 0.25 and 0.05 < median_z < 3.0)
-                logging.info(f"[Init] Depth check: ratio={ratio:.2%}, median_z={median_z:.3f}m, valid={depth_valid}")
+                # Quality gating thresholds
+                min_mask_ratio = 0.025    # At least 2.5% of frame
+                min_depth_ratio = 0.35    # At least 35% valid depth in mask
                 
+                mask_valid = mask_area_ratio >= min_mask_ratio
+                depth_valid = (depth_ratio >= min_depth_ratio and 0.05 < median_z < 3.0)
+                
+                logging.info(f"[QualityGate] mask_area={mask_area_ratio:.1%}, depth_ratio={depth_ratio:.1%}, median_z={median_z:.3f}m")
+                logging.info(f"[QualityGate] mask_valid={mask_valid}, depth_valid={depth_valid}")
+                
+                if not mask_valid:
+                    logging.warning("[QualityGate] Mask too small, skipping reference initialization")
                 if not depth_valid:
-                    logging.warning("[Init] Insufficient valid depth, skipping reference initialization")
+                    logging.warning("[QualityGate] Insufficient valid depth, skipping reference initialization")
             
             # Debug: Save ROI and mask for analysis
             dbg_dir = Path("debug_roi")
@@ -346,10 +360,10 @@ class FoundationPosePipeline:
             logging.debug(f"[Debug] Saved ROI to {dbg_dir}")
             
             pose = None
-            if depth_valid:
+            if mask_valid and depth_valid:
                 pose = self.fp_wrapper.init_pose_from_refs(roi_rgb, roi_depth, mask)
             else:
-                logging.info("[Init] Skipping reference initialization due to poor depth quality")
+                logging.info("[Init] Skipping reference initialization due to poor quality (mask or depth)")
             
             # Check initialization result
             if pose is None:

@@ -326,7 +326,11 @@ class FoundationPoseWrapper:
             )[0, 0]
             scores_i.append(template_score)
             
-            # 2) Histogram correlation
+            # 2) Gradient NCC (for texture-weak scenes)
+            grad_score = self._compute_gradient_ncc(query_preprocessed, ref_resized)
+            scores_i.append(grad_score)
+            
+            # 3) Histogram correlation
             hist_score = cv2.compareHist(
                 cv2.calcHist([cv2.cvtColor(query_preprocessed, cv2.COLOR_RGB2GRAY)], [0], None, [256], [0, 256]),
                 cv2.calcHist([cv2.cvtColor(ref_resized, cv2.COLOR_RGB2GRAY)], [0], None, [256], [0, 256]),
@@ -334,7 +338,7 @@ class FoundationPoseWrapper:
             )
             scores_i.append(hist_score)
             
-            # 3) Structural similarity (if available)
+            # 4) Structural similarity (if available)
             try:
                 from skimage.metrics import structural_similarity as ssim
                 gray1 = cv2.cvtColor(query_preprocessed, cv2.COLOR_RGB2GRAY)
@@ -345,23 +349,43 @@ class FoundationPoseWrapper:
                 ssim_score = 0.0
                 scores_i.append(ssim_score)
             
-            # Weighted combination of scores
-            combined_score = (0.5 * template_score + 0.3 * hist_score + 0.2 * ssim_score)
+            # Weighted combination of scores (adjusted for gradient NCC)
+            combined_score = (0.4 * template_score + 0.3 * grad_score + 0.2 * ssim_score + 0.1 * hist_score)
             scores.append(combined_score)
             
             if combined_score > best_score:
                 best_score = combined_score
                 best_idx = i
         
-        # Log detailed matching scores
-        print(f"[RefMatch] refs={len(self.refs_bundle.images)}, scores={[f'{s:.3f}' for s in scores]}")
-        print(f"[RefMatch] best_idx={best_idx}, best_score={best_score:.3f}")
+        # Adaptive threshold based on score distribution
+        scores_sorted = sorted(scores, reverse=True)
+        if len(scores_sorted) >= 3:
+            top3_mean = np.mean(scores_sorted[:3])
+            top3_std = np.std(scores_sorted[:3])
+            adaptive_thr = max(0.15, top3_mean - 0.5 * top3_std)
+        else:
+            adaptive_thr = 0.2  # fallback
         
-        # Relaxed threshold for testing (was 0.3, now 0.2)
-        return best_idx if best_score > 0.2 else None
+        # Margin validation (best vs second best)
+        margin_delta = 0.05
+        if len(scores_sorted) >= 2:
+            best_score, second_best = scores_sorted[0], scores_sorted[1]
+            margin_ok = (best_score - second_best) >= margin_delta
+        else:
+            margin_ok = True  # only one reference
+        
+        # Combined validation
+        valid_by_adaptive = (best_score >= adaptive_thr) and margin_ok
+        
+        # Log detailed matching scores
+        print(f"[RefMatch] N={len(self.refs_bundle.images)} | best={best_score:.3f} (δ={best_score-scores_sorted[1] if len(scores_sorted)>1 else 0:.3f}) | thr={adaptive_thr:.2f} | valid={valid_by_adaptive}")
+        print(f"[RefMatch] scores={[f'{s:.3f}' for s in scores_sorted[:5]]}")  # Show top 5
+        
+        return best_idx if valid_by_adaptive else None
     
-    def _preprocess_for_matching(self, img: np.ndarray, mask: Optional[np.ndarray] = None) -> np.ndarray:
-        """Consistent preprocessing for both query and reference images."""
+    def _preprocess_for_matching(self, img: np.ndarray, mask: Optional[np.ndarray] = None, 
+                                gamma: float = 1.0, use_clahe: bool = True) -> np.ndarray:
+        """Consistent preprocessing for both query and reference images with lighting normalization."""
         # Ensure RGB format
         if img.ndim == 3 and img.shape[2] == 3:
             # Assume BGR if loaded with cv2.imread, convert to RGB
@@ -380,7 +404,70 @@ class FoundationPoseWrapper:
             # Set background to black
             img_resized = img_resized * mask_binary[:, :, np.newaxis]
         
-        return img_resized
+        # Lighting normalization
+        img_normalized = self._normalize_lighting(img_resized, gamma, use_clahe)
+        
+        return img_normalized
+    
+    def _normalize_lighting(self, img: np.ndarray, gamma: float = 1.0, use_clahe: bool = True) -> np.ndarray:
+        """Normalize lighting using gamma correction and CLAHE."""
+        img_norm = img.astype(np.uint8)
+        
+        # Gamma correction
+        if gamma != 1.0:
+            inv_gamma = 1.0 / gamma
+            table = np.array([((i / 255.0) ** inv_gamma) * 255 for i in range(256)], dtype=np.uint8)
+            img_norm = cv2.LUT(img_norm, table)
+        
+        # CLAHE (Contrast Limited Adaptive Histogram Equalization)
+        if use_clahe:
+            # Convert to LAB color space for better results
+            lab = cv2.cvtColor(img_norm, cv2.COLOR_RGB2LAB)
+            l, a, b = cv2.split(lab)
+            
+            # Apply CLAHE to L channel
+            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+            l_clahe = clahe.apply(l)
+            
+            # Merge back
+            lab_clahe = cv2.merge([l_clahe, a, b])
+            img_norm = cv2.cvtColor(lab_clahe, cv2.COLOR_LAB2RGB)
+        
+        return img_norm
+    
+    def _compute_gradient_ncc(self, img1: np.ndarray, img2: np.ndarray) -> float:
+        """Compute Normalized Cross Correlation on gradient magnitudes."""
+        # Convert to grayscale
+        gray1 = cv2.cvtColor(img1, cv2.COLOR_RGB2GRAY).astype(np.float32)
+        gray2 = cv2.cvtColor(img2, cv2.COLOR_RGB2GRAY).astype(np.float32)
+        
+        # Compute gradients
+        gx1 = cv2.Sobel(gray1, cv2.CV_32F, 1, 0, ksize=3)
+        gy1 = cv2.Sobel(gray1, cv2.CV_32F, 0, 1, ksize=3)
+        gx2 = cv2.Sobel(gray2, cv2.CV_32F, 1, 0, ksize=3)
+        gy2 = cv2.Sobel(gray2, cv2.CV_32F, 0, 1, ksize=3)
+        
+        # Compute gradient magnitudes
+        grad_mag1 = cv2.magnitude(gx1, gy1)
+        grad_mag2 = cv2.magnitude(gx2, gy2)
+        
+        # Normalize to 0-1 range
+        grad_mag1 = cv2.normalize(grad_mag1, None, 0, 1, cv2.NORM_MINMAX)
+        grad_mag2 = cv2.normalize(grad_mag2, None, 0, 1, cv2.NORM_MINMAX)
+        
+        # Compute NCC
+        mean1 = np.mean(grad_mag1)
+        mean2 = np.mean(grad_mag2)
+        
+        num = np.sum((grad_mag1 - mean1) * (grad_mag2 - mean2))
+        den = np.sqrt(np.sum((grad_mag1 - mean1)**2) * np.sum((grad_mag2 - mean2)**2))
+        
+        if den == 0:
+            return 0.0
+        
+        ncc = num / den
+        # Convert to 0-1 range (NCC can be -1 to 1)
+        return (ncc + 1.0) / 2.0
     
     def _estimate_pose_from_matching(self, rgb: np.ndarray, depth: Optional[np.ndarray],
                                    mask: Optional[np.ndarray], ref_idx: int) -> Optional[np.ndarray]:
@@ -395,11 +482,24 @@ class FoundationPoseWrapper:
             mask_binary = (mask > 0).astype(np.uint8)
             
             # Get valid depth values in mask area
-            valid_depth = (depth_m > 0) & (depth_m < 5.0) & (mask_binary > 0)
+            zmin, zmax = 0.05, 2.0  # Working distance range
+            valid_depth = (depth_m > zmin) & (depth_m < zmax) & (mask_binary > 0)
             if valid_depth.any():
                 depth_values = depth_m[valid_depth]
-                # Use median for robustness against outliers
-                z_median = float(np.median(depth_values))
+                
+                # IQR-based outlier filtering for robust Z estimation
+                if len(depth_values) > 50:  # Enough points for robust statistics
+                    q1, q3 = np.percentile(depth_values, [25, 75])
+                    iqr = q3 - q1
+                    outlier_factor = 1.5
+                    depth_robust = depth_values[
+                        (depth_values >= q1 - outlier_factor * iqr) & 
+                        (depth_values <= q3 + outlier_factor * iqr)
+                    ]
+                    z_median = float(np.median(depth_robust)) if len(depth_robust) > 0 else float(np.median(depth_values))
+                    print(f"[PoseEst] IQR filter: {len(depth_values)} -> {len(depth_robust) if len(depth_values) > 50 else len(depth_values)} points")
+                else:
+                    z_median = float(np.median(depth_values))
                 
                 # Set translation z component
                 pose[2, 3] = z_median
