@@ -17,11 +17,17 @@ align_to_color: true
 # Per-stream intrinsics at the above profile resolutions
 intrinsics:
   color:
-    fx: 615.0; fy: 615.0; cx: 320.0; cy: 240.0   # Focal/Principal at color resolution (pixels)
+    fx: 615.0
+    fy: 615.0
+    cx: 320.0
+    cy: 240.0
     dist_model: "brown"                           # Distortion model: brown | inverse_brown | none
     dist: [0.0, 0.0, 0.0, 0.0, 0.0]               # k1,k2,p1,p2,k3 (if using raw frames for PnP)
   depth:
-    fx: 384.1; fy: 384.1; cx: 319.5; cy: 239.5   # At depth resolution
+    fx: 384.1
+    fy: 384.1
+    cx: 319.5
+    cy: 239.5
     dist_model: "inverse_brown"
     dist: [0.0, 0.0, 0.0, 0.0, 0.0]
 
