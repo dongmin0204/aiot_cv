@@ -342,23 +342,6 @@ class FoundationPosePipeline:
             else:
                 logging.debug(f"[DepthDBG] RGB/Depth alignment OK: {roi_rgb.shape[:2]}")
         
-        # Step 4: FoundationPose estimation
-        if self.current_pose is None:
-            # Check cooldown to prevent initialization spam
-            now = time.time()
-            if now < self.init_cooldown_until:
-                logging.debug(f"[Init] Cooldown active, skipping initialization")
-                return self.current_pose
-            
-            # Check detection confidence threshold
-            if detection.confidence < 0.75:
-                logging.debug(f"[Init] Low confidence ({detection.confidence:.3f}), setting cooldown")
-                self.init_cooldown_until = now + 0.2
-                return self.current_pose
-            
-            # Initialize pose from reference images
-            logging.info("Initializing pose from references...")
-            
         # Warmup check: Skip first N frames for sensor stabilization
         if self.frame_count < self.warmup_frames:
             logging.info(f"[Warmup] Skipping frame {self.frame_count+1}/{self.warmup_frames}")
@@ -368,6 +351,7 @@ class FoundationPosePipeline:
         depth_valid = True
         mask_valid = True
         global_depth_valid = True
+        overall_valid = True  # Initialize to True, will be updated if depth/mask available
         
         if roi_depth is not None and mask is not None:
             depth_m = roi_depth.astype(np.float32) * self.depth_scale
@@ -417,8 +401,8 @@ class FoundationPosePipeline:
                         f"global_depth={global_depth_ratio:.1%} (>={min_global_depth:.1%})")
             logging.info(f"[{gate_status}Gate] median_z={median_z:.3f}m, z_ema={self.z_ema:.3f}m")
             
-            # Overall validity
-            overall_valid = mask_valid and depth_valid and global_depth_valid
+            # Overall validity (include confidence check)
+            overall_valid = conf_valid and mask_valid and depth_valid and global_depth_valid
             
             if not overall_valid:
                 failure_reasons = []
@@ -453,8 +437,31 @@ class FoundationPosePipeline:
                 cv2.imwrite(str(dbg_dir / f"roi_mask_{self.frame_count:06d}.png"), 
                            (mask.astype(np.uint8) * 255))
             logging.debug(f"[Debug] Saved ROI to {dbg_dir}")
+        else:
+            # No depth/mask available - quality gating not applicable  
+            # In this case, overall_valid remains True (initialized above)
+            logging.info("[QualityGate] No depth/mask available, skipping quality checks")
+        
+        # Step 4: FoundationPose estimation (initialization or tracking)
+        pose = None
+        
+        if self.current_pose is None:
+            # INITIALIZATION MODE
+            # Check cooldown to prevent initialization spam
+            now = time.time()
+            if now < self.init_cooldown_until:
+                logging.debug(f"[Init] Cooldown active, skipping initialization")
+                return None
             
-            pose = None
+            # Check detection confidence threshold
+            if detection.confidence < 0.75:
+                logging.debug(f"[Init] Low confidence ({detection.confidence:.3f}), setting cooldown")
+                self.init_cooldown_until = now + 0.2
+                return None
+            
+            # Initialize pose from reference images
+            logging.info("Initializing pose from references...")
+            
             if overall_valid:
                 pose = self.fp_wrapper.init_pose_from_refs(roi_rgb, roi_depth, mask)
             else:
@@ -462,24 +469,21 @@ class FoundationPosePipeline:
             
             # Check initialization result
             if pose is None:
-                logging.warning("[Init] ref match failed -> trying fallback (PCL)")
+                logging.warning("[Init] ref match failed")
+                self.init_cooldown_until = now + 0.2  # 200ms cooldown
+                return None
             else:
                 ok = np.isfinite(pose).all() and pose.shape == (4,4) and pose[2,3] > 0.01
                 logging.info(f"[Init] ref match pose z={pose[2,3]:.4f} valid={ok}")
                 if not ok:
-                    logging.warning("[Init] Invalid pose detected, falling back to PCL")
-                    pose = None
+                    logging.warning("[Init] Invalid pose detected")
+                    self.init_cooldown_until = now + 0.2  # 200ms cooldown
+                    return None
                 else:
                     logging.info("[Init] Reference initialization successful!")
-            
-            # Set cooldown if initialization failed
-            if pose is None:
-                self.init_cooldown_until = now + 0.2  # 200ms cooldown
-            
-            # Note: Old PCL fallback removed - now handled in FoundationPose wrapper with PCA+ICP
         else:
-            # Track pose
-            print("Tracking pose...")
+            # TRACKING MODE
+            logging.debug("Tracking pose...")
             pose = self.fp_wrapper.track(roi_rgb, roi_depth, mask)
         
         # Validate pose
