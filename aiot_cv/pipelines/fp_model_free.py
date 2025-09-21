@@ -771,8 +771,6 @@ class FoundationPosePipeline:
                         reason = "WARMUP"
                     elif not hasattr(self, 'last_detection') or self.last_detection is None:
                         reason = "NO_DETECTION"
-                    elif not overall_valid:
-                        reason = "QUALITY_GATE"
                     else:
                         reason = "INIT_FAILED"
                     
