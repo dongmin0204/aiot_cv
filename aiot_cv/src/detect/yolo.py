@@ -47,7 +47,7 @@ class YoloSeg:
 		if weights is None:
 			# Prefer local trained weights if exist
 			cand = [
-				"train_results/exp1/weights/best.pt",
+				"train_results/exp1/weights/last.pt",
 				"tool_seg/yolov8n.pt",
 			]
 			for c in cand:
