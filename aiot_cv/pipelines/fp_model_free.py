@@ -11,6 +11,9 @@ import cv2
 from pathlib import Path
 from typing import Optional, Dict, Any
 import yaml
+import logging
+import sys
+from datetime import datetime
 
 # Import our modules
 from aiot_cv.src.detect.yolo import YoloSeg, Detection
@@ -18,6 +21,42 @@ from aiot_cv.src.pose.foundationpose import FoundationPoseWrapper
 from aiot_cv.src.track.smoother import RealtimePCASmoother, PoseFilterConfig
 from aiot_cv.src.pc.pointcloud import rgbd_to_pcl, filter_pointcloud
 from aiot_cv.src.io.load_k import load_K
+
+
+def setup_logging(log_file: Optional[str] = None):
+    """Setup logging to both console and file."""
+    if log_file is None:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        log_file = f"fp_pipeline_log_{timestamp}.txt"
+    
+    # Create logger
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO)
+    
+    # Clear existing handlers
+    for handler in logger.handlers[:]:
+        logger.removeHandler(handler)
+    
+    # Create formatter
+    formatter = logging.Formatter(
+        '%(asctime)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    
+    # Console handler
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(logging.INFO)
+    console_handler.setFormatter(formatter)
+    logger.addHandler(console_handler)
+    
+    # File handler
+    file_handler = logging.FileHandler(log_file, mode='w', encoding='utf-8')
+    file_handler.setLevel(logging.INFO)
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+    
+    print(f"Logging to console and file: {log_file}")
+    return log_file
 
 
 class FoundationPosePipeline:
@@ -167,7 +206,7 @@ class FoundationPosePipeline:
         
         # Get best detection (highest confidence)
         detection = detections[0]
-        print(f"Best detection: {detection.class_name} (conf={detection.confidence:.3f})")
+        logging.info(f"Best detection: {detection.class_name} (conf={detection.confidence:.3f})")
         
         # Step 2: Auto-switch references based on detected class
         tool = detection.class_name.lower()
@@ -175,15 +214,15 @@ class FoundationPosePipeline:
         
         if tool_dir.exists():
             if getattr(self, "_loaded_tool", None) != tool:
-                print(f"[Refs] Switching to: {tool_dir}")
+                logging.info(f"[Refs] Switching to: {tool_dir}")
                 self.fp_wrapper.load_refs_bundle(str(tool_dir), self.K, self.depth_scale)
                 self._loaded_tool = tool
         else:
-            print(f"[Refs] Missing directory: {tool_dir}")
+            logging.warning(f"[Refs] Missing directory: {tool_dir}")
             # Try fallback to generic references
             generic_dir = Path(self.config['references']['refs_dir'])
             if generic_dir.exists() and getattr(self, "_loaded_tool", None) != "generic":
-                print(f"[Refs] Using generic references: {generic_dir}")
+                logging.info(f"[Refs] Using generic references: {generic_dir}")
                 self.fp_wrapper.load_refs_bundle(str(generic_dir), self.K, self.depth_scale)
                 self._loaded_tool = "generic"
         
@@ -227,7 +266,7 @@ class FoundationPosePipeline:
         # Step 4: FoundationPose estimation
         if self.current_pose is None:
             # Initialize pose from reference images
-            print("Initializing pose from references...")
+            logging.info("Initializing pose from references...")
             
             # Debug: Save ROI and mask for analysis
             dbg_dir = Path("debug_roi")
@@ -239,7 +278,7 @@ class FoundationPosePipeline:
             if mask is not None:
                 cv2.imwrite(str(dbg_dir / f"roi_mask_{self.frame_count:06d}.png"), 
                            (mask.astype(np.uint8) * 255))
-            print(f"[Debug] Saved ROI to {dbg_dir}")
+            logging.debug(f"[Debug] Saved ROI to {dbg_dir}")
             
             pose = self.fp_wrapper.init_pose_from_refs(roi_rgb, roi_depth, mask)
             
@@ -701,12 +740,16 @@ def main():
     parser.add_argument('--output', help='Output video file')
     parser.add_argument('--realsense', action='store_true', help='Use RealSense camera')
     parser.add_argument('--create-config', help='Create config template at specified path')
+    parser.add_argument('--log-file', help='Log file path (default: auto-generated)')
     
     args = parser.parse_args()
     
     if args.create_config:
         create_config_template(args.create_config)
         return
+    
+    # Setup logging to console and file
+    log_file = setup_logging(args.log_file)
     
     # Initialize pipeline
     pipeline = FoundationPosePipeline(args.config)
