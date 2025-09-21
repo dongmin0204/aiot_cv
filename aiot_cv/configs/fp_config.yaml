@@ -1,0 +1,21 @@
+yolo:
+  weights: null  # Auto-detect from local files
+  conf: 0.5
+  imgsz: 640
+
+foundationpose:
+  device: cuda
+  model_path: null  # Model-free mode
+
+smoothing:
+  window_size: 5
+  max_angular_velocity: 2.0
+  max_translation_velocity: 1.0
+  outlier_threshold: 0.1
+
+camera:
+  camera_yaml: aiot_cv/configs/camera.yaml
+
+references:
+  refs_dir: aiot_cv/data/references
+  tool_class: screwdriver
