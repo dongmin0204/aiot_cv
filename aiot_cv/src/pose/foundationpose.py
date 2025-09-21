@@ -164,14 +164,17 @@ class FoundationPoseWrapper:
                     # Load mask with all channels preserved
                     mask = cv2.imread(mask_path, cv2.IMREAD_UNCHANGED)
                     if mask is None:
+                        print(f"Warning: Mask not found: {mask_path}")
                         continue
                     
                     # Handle different channel configurations
                     if mask.ndim == 2:               # Already 1-channel (grayscale)
                         pass
-                    elif mask.shape[2] == 4:         # RGBA -> use alpha channel as mask
+                    elif mask.ndim == 3 and mask.shape[2] == 1:  # (H,W,1) -> squeeze to (H,W)
+                        mask = mask[:, :, 0]
+                    elif mask.ndim == 3 and mask.shape[2] == 4:   # RGBA -> use alpha channel as mask
                         mask = mask[:, :, 3]
-                    elif mask.shape[2] == 3:         # BGR -> convert to grayscale
+                    elif mask.ndim == 3 and mask.shape[2] == 3:   # BGR -> convert to grayscale
                         mask = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
                     else:
                         print(f"Warning: Unsupported mask shape {mask.shape}, skipping {mask_file}")

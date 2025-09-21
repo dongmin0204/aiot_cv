@@ -19,6 +19,7 @@ from datetime import datetime
 from aiot_cv.src.detect.yolo import YoloSeg, Detection
 from aiot_cv.src.pose.foundationpose import FoundationPoseWrapper
 from aiot_cv.src.utils.visualization_3d import Pose3DVisualizer
+from aiot_cv.src.utils.viz_axes import visualize_pose_and_mask
 from aiot_cv.src.track.smoother import RealtimePCASmoother, PoseFilterConfig
 from aiot_cv.src.pc.pointcloud import rgbd_to_pcl, filter_pointcloud
 from aiot_cv.src.io.load_k import load_K
@@ -81,6 +82,13 @@ class FoundationPosePipeline:
             config_path: Path to pipeline configuration file
         """
         self.config = self._load_config(config_path)
+        
+        # Pipeline defaults (prevent AttributeError)
+        pipeline_cfg = self.config.get("pipeline", {})
+        self.warmup_frames = int(pipeline_cfg.get("warmup_frames", 10))
+        self.min_confidence = float(pipeline_cfg.get("min_confidence", 0.5))
+        self.target_labels = set(pipeline_cfg.get("target_labels", []))
+        # Note: target_labels empty = use all classes
         self.detector = None
         self.fp_wrapper = None
         self.smoother = None
@@ -142,6 +150,37 @@ class FoundationPosePipeline:
         
         return config
     
+    def _setup_class_filter(self):
+        """Setup class filtering with safety fallback."""
+        if not hasattr(self.detector, 'model') or not hasattr(self.detector.model, 'names'):
+            logging.warning("Cannot setup class filter: detector not properly initialized")
+            self.yolo_infer_kwargs = {"conf": self.min_confidence}
+            return
+        
+        # Get class names from YOLO model
+        names = list(self.detector.model.names.values())
+        name2idx = {n.lower().strip(): i for i, n in enumerate(names)}
+        
+        if self.target_labels:
+            # Try to map target labels to model classes
+            valid_classes = []
+            for target in self.target_labels:
+                target_lower = target.lower().strip()
+                if target_lower in name2idx:
+                    valid_classes.append(name2idx[target_lower])
+                else:
+                    logging.warning(f"Target label '{target}' not found in model classes: {names}")
+            
+            if valid_classes:
+                logging.info(f"Applying class filter: {list(self.target_labels)} -> indices {valid_classes}")
+                self.yolo_infer_kwargs = {"classes": valid_classes, "conf": self.min_confidence}
+            else:
+                logging.warning("No valid target labels found - using all classes as fallback")
+                self.yolo_infer_kwargs = {"conf": self.min_confidence}
+        else:
+            logging.info("No target labels specified - using all classes")
+            self.yolo_infer_kwargs = {"conf": self.min_confidence}
+    
     def setup(self):
         """Setup all components of the pipeline."""
         print("Setting up pipeline components...")
@@ -157,6 +196,9 @@ class FoundationPosePipeline:
             imgsz=self.config['yolo']['imgsz']
         )
         print("YOLO detector initialized")
+        
+        # Setup class filtering with safety fallback
+        self._setup_class_filter()
         
         # Initialize FoundationPose wrapper
         fp_config = self.config['foundationpose']
@@ -202,19 +244,17 @@ class FoundationPosePipeline:
         # Start timing
         frame_start_time = time.time()
         
-        # Step 1: YOLO detection
-        detections = self.detector(rgb, depth)
-        
-        # Class filter - only allow screwdriver for now
-        allowed_classes = {"screwdriver"}
-        detections = [d for d in detections if d.class_name.lower().replace(' ', '_') in allowed_classes]
+        # Step 1: YOLO detection with class filter
+        infer_kwargs = getattr(self, 'yolo_infer_kwargs', {"conf": 0.5})
+        detections = self.detector(rgb, depth, **infer_kwargs)
         
         if not detections:
-            print("No detections found (after class filter)")
+            logging.warning("No detections found (after class filter)")
             return None
         
         # Get best detection (highest confidence)
         detection = detections[0]
+        self.last_detection = detection  # Store for visualization
         logging.info(f"Best detection: {detection.class_name} (conf={detection.confidence:.3f})")
         
         # Step 2: Auto-switch references based on detected class
@@ -660,6 +700,21 @@ class FoundationPosePipeline:
                 
                 # Process frame through pipeline
                 pose = self.process_frame(color_image, depth_image)
+                
+                # Enhanced mask + axis visualization
+                if hasattr(self, 'last_detection') and self.last_detection is not None:
+                    detection = self.last_detection
+                    mask = detection.mask
+                    depth_m = depth_image.astype(np.float32) * self.depth_scale
+                    
+                    # Create comprehensive visualization
+                    viz_image = visualize_pose_and_mask(
+                        color_image, mask, pose, depth_m, self.K, axis_len=0.05
+                    )
+                    
+                    # Show both original and visualization
+                    combined = np.hstack([color_image, viz_image])
+                    cv2.imshow('FoundationPose: Original | Visualization', combined)
                 
                 # Draw visualization with detailed status and 3D overlay
                 if pose is not None:

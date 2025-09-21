@@ -1,3 +1,8 @@
+pipeline:
+  warmup_frames: 10
+  min_confidence: 0.5
+  target_labels: ["Screwdriver"]
+
 yolo:
   weights: null  # Auto-detect from local files
   conf: 0.35  # Lower confidence for better mask coverage
