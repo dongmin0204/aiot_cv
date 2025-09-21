@@ -138,12 +138,27 @@ class FoundationPoseWrapper:
             for mask_file in mask_candidates:
                 mask_path = os.path.join(masks_dir, mask_file)
                 if os.path.exists(mask_path):
-                    mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
-                    # Ensure mask is single channel and binary (0/255)
-                    if mask is not None:
-                        if len(mask.shape) == 3:
-                            mask = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
-                        mask = (mask > 127).astype(np.uint8) * 255
+                    # Load mask with all channels preserved
+                    mask = cv2.imread(mask_path, cv2.IMREAD_UNCHANGED)
+                    if mask is None:
+                        continue
+                    
+                    # Handle different channel configurations
+                    if mask.ndim == 2:               # Already 1-channel (grayscale)
+                        pass
+                    elif mask.shape[2] == 4:         # RGBA -> use alpha channel as mask
+                        mask = mask[:, :, 3]
+                    elif mask.shape[2] == 3:         # BGR -> convert to grayscale
+                        mask = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
+                    else:
+                        print(f"Warning: Unsupported mask shape {mask.shape}, skipping {mask_file}")
+                        continue
+                    
+                    # Ensure uint8 and binarize (0/255)
+                    if mask.dtype != np.uint8:
+                        mask = mask.astype(np.uint8)
+                    _, mask = cv2.threshold(mask, 127, 255, cv2.THRESH_BINARY)
+                    
                     print(f"Loaded mask: {mask_file}")
                     break
             
