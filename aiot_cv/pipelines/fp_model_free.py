@@ -25,6 +25,93 @@ from aiot_cv.src.pc.pointcloud import rgbd_to_pcl, filter_pointcloud
 from aiot_cv.src.io.load_k import load_K
 
 
+def harmonize_mask_depth(mask_bin, depth_m):
+    """마스크를 깊이맵 해상도에 맞춰 최근접 보간으로 리사이즈"""
+    import cv2, numpy as np
+    if mask_bin is None or depth_m is None:
+        return mask_bin
+    Hd, Wd = depth_m.shape[:2]
+    Hm, Wm = mask_bin.shape[:2]
+    if (Hm, Wm) != (Hd, Wd):
+        mask_bin = cv2.resize(mask_bin.astype('uint8'), (Wd, Hd), interpolation=cv2.INTER_NEAREST)
+    return (mask_bin > 0).astype('uint8')
+
+
+def safe_pick_depth_from_mask(mask_bin, depth_m):
+    """마스크 픽셀만 깊이 샘플링 (경계/유효성 안전 처리)"""
+    import numpy as np
+    Hd, Wd = depth_m.shape[:2]
+    ys, xs = np.nonzero(mask_bin)
+    if ys.size == 0:
+        return None, None, None
+
+    # 경계 안전화
+    ok = (ys >= 0) & (ys < Hd) & (xs >= 0) & (xs < Wd)
+    ys, xs = ys[ok], xs[ok]
+    if ys.size == 0:
+        return None, None, None
+
+    Z = depth_m[ys, xs]
+    okz = np.isfinite(Z) & (Z > 0)
+    ys, xs, Z = ys[okz], xs[okz], Z[okz]
+    if ys.size < 100:  # 너무 적으면 PCA 불안정
+        return None, None, None
+    return ys, xs, Z
+
+
+def pca_axis_from_depth(mask_bin, depth_m, K):
+    """
+    mask_bin: HxW uint8(0/1)
+    depth_m : HxW float32 (미터)
+    K       : (3,3)
+    return: ctr3d(3,), axis(3,) 단위벡터, (optn)설명분산비
+    """
+    import numpy as np
+    mask_bin = harmonize_mask_depth(mask_bin, depth_m)
+    ys, xs, Z = safe_pick_depth_from_mask(mask_bin, depth_m)
+    if ys is None:
+        raise RuntimeError("PCA: not enough valid points after harmonization")
+
+    fx, fy = K[0, 0], K[1, 1]
+    cx, cy = K[0, 2], K[1, 2]
+
+    X = (xs - cx) * Z / fx
+    Y = (ys - cy) * Z / fy
+    pts = np.stack([X, Y, Z], axis=1)  # (N,3)
+
+    # 중심화 + SVD
+    mu = pts.mean(axis=0, keepdims=True)
+    Q = pts - mu
+    # 수치안정 위해 최소 포인트 검사
+    if Q.shape[0] < 100:
+        raise RuntimeError("PCA: too few points")
+
+    U, S, Vt = np.linalg.svd(Q, full_matrices=False)
+    axis = Vt[0]  # 최대분산 주성분
+    axis = axis / (np.linalg.norm(axis) + 1e-9)
+    expl = (S[0] ** 2) / (np.sum(S ** 2) + 1e-9)
+    return mu.ravel(), axis, float(expl)
+
+
+def draw_axis_from_pca(img_bgr, K, ctr3d, axis, length=0.06):
+    import cv2, numpy as np
+    fx, fy, cx, cy = K[0,0], K[1,1], K[0,2], K[1,2]
+    p0 = ctr3d
+    p1 = ctr3d + axis * length
+
+    def proj(P):
+        x,y,z = P
+        u = fx * x / z + cx
+        v = fy * y / z + cy
+        return int(round(u)), int(round(v))
+
+    u0, v0 = proj(p0)
+    u1, v1 = proj(p1)
+    cv2.circle(img_bgr, (u0,v0), 3, (0,255,255), -1)     # 중심점
+    cv2.arrowedLine(img_bgr, (u0,v0), (u1,v1), (0,0,255), 2, tipLength=0.2)  # 주성분 축
+    return img_bgr
+
+
 def setup_logging(log_file: Optional[str] = None):
     """Setup logging to both console and file."""
     if log_file is None:
@@ -106,6 +193,10 @@ class FoundationPosePipeline:
         # Initialization cooldown to prevent spam
         self.init_cooldown_until = 0
         
+        # Class filtering with auto-fallback
+        self._yolo_allowed_names = None
+        self._empty_det_count = 0
+        
         print(f"FoundationPose pipeline initialized with config: {config_path}")
     
     def _load_config(self, config_path: str) -> Dict[str, Any]:
@@ -161,6 +252,14 @@ class FoundationPosePipeline:
         names = list(self.detector.model.names.values())
         name2idx = {n.lower().strip(): i for i, n in enumerate(names)}
         
+        # Setup new filter method
+        if self.target_labels:
+            self._yolo_allowed_names = set(label.lower().strip() for label in self.target_labels)
+            logging.info(f"Class filtering enabled for: {self._yolo_allowed_names}")
+        else:
+            self._yolo_allowed_names = None
+            logging.info("No class filtering (will use all classes)")
+        
         if self.target_labels:
             # Try to map target labels to model classes
             valid_classes = []
@@ -180,6 +279,53 @@ class FoundationPosePipeline:
         else:
             logging.info("No target labels specified - using all classes")
             self.yolo_infer_kwargs = {"conf": self.min_confidence}
+    
+    def _filter_detections_by_class(self, det):
+        """안전한 클래스 필터링 (다양한 포맷 지원)"""
+        # 허용 이름이 없다면 그대로
+        if not getattr(self, "_yolo_allowed_names", None):
+            return det
+
+        allowed = self._yolo_allowed_names  # 소문자 세트
+        out = []
+
+        # 형태 1: list[dict] (우리 래퍼 가능성)
+        if isinstance(det, (list, tuple)):
+            for d in det:
+                name = None
+                if isinstance(d, dict):
+                    # 다양한 키 지원
+                    name = d.get("name") or d.get("label") or d.get("class_name")
+                    if name is None and "class" in d:
+                        # class id -> 이름 변환 시도
+                        cid = d["class"]
+                        names_dict = getattr(self.detector, "names", None)
+                        if names_dict is not None:
+                            try:
+                                name = names_dict[int(cid)]
+                            except Exception:
+                                pass
+                if isinstance(name, str) and name.strip().lower() in allowed:
+                    out.append(d)
+            return out
+
+        # 형태 2: Ultralytics Results
+        try:
+            r = det[0] if hasattr(det, "__getitem__") else det
+            names = getattr(r, "names", None)
+            boxes = getattr(r, "boxes", None)
+            if names is not None and boxes is not None and hasattr(boxes, "cls"):
+                keep = []
+                for i, c in enumerate(boxes.cls.cpu().numpy().astype(int)):
+                    nm = names.get(c) if isinstance(names, dict) else names[c]
+                    if str(nm).strip().lower() in allowed:
+                        keep.append(i)
+                return r[keep] if keep else r[:0]
+        except Exception:
+            pass
+
+        # 모르는 포맷이면 그대로
+        return det
     
     def setup(self):
         """Setup all components of the pipeline."""
@@ -247,6 +393,20 @@ class FoundationPosePipeline:
         # Step 1: YOLO detection with class filter
         infer_kwargs = getattr(self, 'yolo_infer_kwargs', {"conf": 0.5})
         detections = self.detector(rgb, depth, **infer_kwargs)
+        
+        # Apply new flexible class filter
+        detections = self._filter_detections_by_class(detections)
+        
+        # Auto-fallback: disable filter if empty for 5 consecutive frames
+        if self._yolo_allowed_names and (len(detections) == 0 or getattr(detections, '__len__', lambda:0)() == 0):
+            self._empty_det_count += 1
+            if self._empty_det_count >= 5:
+                logging.warning("Class filter yielded empty for 5 frames -> temporarily disabling filter")
+                self._yolo_allowed_names = None
+                # Re-run detection without filter
+                detections = self.detector(rgb, depth, **infer_kwargs)
+        else:
+            self._empty_det_count = 0
         
         if not detections:
             logging.warning("No detections found (after class filter)")
@@ -489,6 +649,36 @@ class FoundationPosePipeline:
         # Validate pose
         if pose is None or not np.all(np.isfinite(pose)):
             print("FoundationPose estimation failed or invalid pose")
+            
+            # Fallback: Show PCA axis visualization when pose estimation fails
+            if roi_depth is not None and mask is not None:
+                try:
+                    # Convert to proper formats for PCA
+                    depth_m = roi_depth.astype(np.float32) * self.depth_scale
+                    mask_bin = (mask > 0).astype(np.uint8)
+                    
+                    ctr3d, axis, expl = pca_axis_from_depth(mask_bin, depth_m, self.K)
+                    
+                    # Create visualization
+                    color_bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+                    harmonized_mask = harmonize_mask_depth(mask_bin, depth_m)
+                    
+                    # Simple mask overlay
+                    mask_overlay = color_bgr.copy()
+                    mask_overlay[harmonized_mask > 0] = [0, 255, 0]  # Green mask
+                    vis = cv2.addWeighted(color_bgr, 0.7, mask_overlay, 0.3, 0)
+                    
+                    # Draw PCA axis
+                    vis = draw_axis_from_pca(vis, self.K, ctr3d, axis, length=0.06)
+                    
+                    cv2.imshow("mask+axis(pca)", vis)
+                    cv2.waitKey(1)
+                    
+                    logging.info(f"PCA axis fallback: center={ctr3d}, axis={axis}, explained_variance={expl:.3f}")
+                    
+                except Exception as e:
+                    logging.warning(f"PCA axis extraction failed: {e}")
+            
             return self.current_pose  # Return previous pose if available
         
         # Step 4: Apply smoothing
