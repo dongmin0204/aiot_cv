@@ -784,7 +784,7 @@ def main():
     temp_filter = rs.temporal_filter()
     hole_filling = rs.hole_filling_filter(1)
 
-    # === 베이스←카메라 H_BC (예시값: 실제 캘리브레이션으로 교체) ===
+    # === 베이스 <- 카메라 H_BC (예시값: 실제 캘리브레이션으로 교체) ===
     RX_DEG, RY_DEG, RZ_DEG = -180.0, 0.0, -80.0
     TX, TY, TZ = 0.20, 0.0, 0.50
     ORDER = "XYZ"
