@@ -18,6 +18,10 @@ SAMPLE_STRIDE = 2
 Z_MIN, Z_MAX = 0.1, 2.0
 FONT = cv2.FONT_HERSHEY_SIMPLEX
 
+# Depth filling options
+USE_PLANE_FILLING = True  # Enable plane-based depth filling for planar objects
+PLANE_FILL_TAU = 0.01     # RANSAC threshold for plane fitting
+
 
 # Base←Cam extrinsic (example; replace with calibrated values)
 RX_DEG, RY_DEG, RZ_DEG = -180.0, 0.0, -80.0
@@ -84,11 +88,54 @@ def project_points_intr(intr, pts3d):
 
 
 # --------------------
+# Geometric depth filling (plane-based interpolation)
+# --------------------
+def fill_by_plane(depth_u16, mask, depth_scale, intr, x_map, y_map, pts3d, tau=0.01):
+    """
+    평면 기반 깊이 보간: 마스크 내부의 누락된 깊이값을 RANSAC 평면으로 채움
+    테이블, 바닥 등 평면성이 있는 객체에 효과적
+    
+    Args:
+        depth_u16: 원본 깊이 이미지 (uint16)
+        mask: 객체 마스크
+        depth_scale: 깊이 스케일 팩터
+        intr: 카메라 내부 파라미터
+        x_map, y_map: 사전 계산된 좌표 맵
+        pts3d: 3D 포인트 클라우드 (평면 피팅용)
+        tau: RANSAC 임계값
+    
+    Returns:
+        채워진 깊이 이미지 (uint16)
+    """
+    n, d = fit_plane_ransac(pts3d, tau=tau)
+    if n is None: 
+        return depth_u16
+    
+    H, W = depth_u16.shape
+    # 카메라 좌표: X = x_map*Z, Y = y_map*Z
+    # 평면 방정식: n·(Z*[x_map, y_map, 1]) + d = 0
+    # => Z = -d / (n·[x_map, y_map, 1])
+    Z = depth_u16.astype(np.float32) * depth_scale
+    denom = (n[0]*x_map + n[1]*y_map + n[2])
+    Z_plane = -d / (denom + 1e-9)
+    
+    # 마스크 내부에서 깊이가 없는(<=0) 픽셀에만 평면 깊이 적용
+    m = (mask > 0) & (Z <= 0)
+    Z[m] = np.clip(Z_plane[m], 0.0, 10.0)
+    
+    return (Z / depth_scale).astype(np.uint16)
+
+
+# --------------------
 # Depth → 3D points (mask-based)
 # --------------------
 def mask_to_points3d(depth_frame, mask, depth_scale, intr, x_map, y_map,
-                     sample_stride=1, z_min=0.0, z_max=10.0, erosion=3):
-    depth_u16 = np.asanyarray(depth_frame.get_data())
+                     sample_stride=1, z_min=0.0, z_max=10.0, erosion=3, depth_u16_override=None):
+    # Allow override of depth data for plane-filled depth
+    if depth_u16_override is not None:
+        depth_u16 = depth_u16_override
+    else:
+        depth_u16 = np.asanyarray(depth_frame.get_data())
     H, W = depth_u16.shape[:2]
     if mask.shape[:2] != (H, W):
         mask = cv2.resize(mask.astype(np.uint8), (W, H), interpolation=cv2.INTER_NEAREST)
@@ -410,8 +457,21 @@ def main():
                     mask = np.zeros((H,W), np.uint8)
                     mask[max(0,y1):min(H,y2+1), max(0,x1):min(W,x2+1)] = 1
 
+                # Optional: Apply plane-based depth filling for planar objects
+                depth_u16_to_use = None
+                if USE_PLANE_FILLING:
+                    # First get initial 3D points to estimate plane
+                    pts3d_initial = mask_to_points3d(d, mask, depth_scale, intr, x_map, y_map,
+                                                    sample_stride=SAMPLE_STRIDE, z_min=Z_MIN, z_max=Z_MAX, erosion=3)
+                    if pts3d_initial is not None and pts3d_initial.shape[0] >= 100:  # Need enough points for plane fitting
+                        # Apply plane-based depth filling
+                        depth_u16_to_use = fill_by_plane(
+                            np.asanyarray(d.get_data()), mask, depth_scale, intr, x_map, y_map, 
+                            pts3d_initial, tau=PLANE_FILL_TAU)
+                
                 pts3d = mask_to_points3d(d, mask, depth_scale, intr, x_map, y_map,
-                                         sample_stride=SAMPLE_STRIDE, z_min=Z_MIN, z_max=Z_MAX, erosion=3)
+                                         sample_stride=SAMPLE_STRIDE, z_min=Z_MIN, z_max=Z_MAX, erosion=3,
+                                         depth_u16_override=depth_u16_to_use)
                 if pts3d is None:
                     continue
 
@@ -429,12 +489,13 @@ def main():
                 draw_obb3d_on_image(overlay, intr, corners3d)
                 draw_axes3d(overlay, intr, center3d, axes3, lens3)
 
-                # label with class, conf, Z, and stability info
+                # label with class, conf, Z, stability info, and plane filling status
                 uv_c, ok = project_points_intr(intr, center3d.reshape(1,3))
                 if ok[0]:
                     cx, cy = int(round(uv_c[0,0])), int(round(uv_c[0,1]))
                     stability_text = "STABLE" if is_stable else "UNSTABLE"
-                    label = f"{cls_name} {conf:.2f} Z:{center3d[2]:.2f} [{stability_text}]"
+                    plane_fill_text = "PF" if (depth_u16_to_use is not None) else ""
+                    label = f"{cls_name} {conf:.2f} Z:{center3d[2]:.2f} [{stability_text}]{plane_fill_text}"
                     (tw, th), _ = cv2.getTextSize(label, FONT, 0.55, 2)
                     y_text = max(cy, th+8)
                     color_bg = (50, 200, 50) if is_stable else (50, 50, 200)
