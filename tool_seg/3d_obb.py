@@ -4,6 +4,9 @@ import math
 import numpy as np
 import pyrealsense2 as rs
 from ultralytics import YOLO
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
+import threading
 
 
 # --------------------
@@ -26,6 +29,11 @@ PLANE_FILL_TAU = 0.01     # RANSAC threshold for plane fitting
 SHOW_POINT_CLOUD = True   # Show 3D points on the image
 POINT_CLOUD_STRIDE = 5    # Skip every N points for visualization (to avoid clutter)
 POINT_CLOUD_SIZE = 2      # Size of point markers
+
+# 3D matplotlib visualization options
+SHOW_3D_PLOT = False      # Show 3D matplotlib window
+UPDATE_3D_PLOT = True     # Update 3D plot in real-time
+PLOT_MAX_POINTS = 1000    # Maximum points to show in 3D plot for performance
 
 
 # Base←Cam extrinsic (example; replace with calibrated values)
@@ -373,6 +381,137 @@ class PoseStabilizer:
 
 
 # --------------------
+# 3D Matplotlib Visualization
+# --------------------
+class PointCloud3DVisualizer:
+    def __init__(self, max_points=1000):
+        self.max_points = max_points
+        self.fig = None
+        self.ax = None
+        self.points_data = []
+        self.obb_data = []
+        self.is_active = False
+        
+    def initialize(self):
+        """Initialize matplotlib 3D plot"""
+        plt.ion()  # Interactive mode
+        self.fig = plt.figure(figsize=(10, 8))
+        self.ax = self.fig.add_subplot(111, projection='3d')
+        self.ax.set_xlabel('X (m)')
+        self.ax.set_ylabel('Y (m)')
+        self.ax.set_zlabel('Z (m)')
+        self.ax.set_title('3D Point Cloud Visualization')
+        self.is_active = True
+        
+    def update_data(self, pts3d_list, obb_list):
+        """Update 3D data for visualization"""
+        self.points_data = pts3d_list
+        self.obb_data = obb_list
+        
+    def render(self):
+        """Render the 3D plot"""
+        if not self.is_active or self.fig is None:
+            return
+            
+        try:
+            self.ax.clear()
+            self.ax.set_xlabel('X (m)')
+            self.ax.set_ylabel('Y (m)')
+            self.ax.set_zlabel('Z (m)')
+            self.ax.set_title('3D Point Cloud Visualization')
+            
+            # Plot point clouds for each object
+            colors = ['red', 'green', 'blue', 'yellow', 'purple', 'orange', 'cyan', 'magenta']
+            
+            for i, pts3d in enumerate(self.points_data):
+                if pts3d is not None and len(pts3d) > 0:
+                    # Subsample for performance
+                    if len(pts3d) > self.max_points:
+                        indices = np.random.choice(len(pts3d), self.max_points, replace=False)
+                        pts_subset = pts3d[indices]
+                    else:
+                        pts_subset = pts3d
+                    
+                    color = colors[i % len(colors)]
+                    self.ax.scatter(pts_subset[:, 0], pts_subset[:, 1], pts_subset[:, 2], 
+                                  c=color, s=1, alpha=0.6, label=f'Object {i+1}')
+            
+            # Plot OBB corners
+            for i, obb_data in enumerate(self.obb_data):
+                if obb_data is not None:
+                    corners, center = obb_data
+                    color = colors[i % len(colors)]
+                    
+                    # Plot OBB corners
+                    self.ax.scatter(corners[:, 0], corners[:, 1], corners[:, 2], 
+                                  c=color, s=50, marker='s', alpha=0.8)
+                    
+                    # Plot center
+                    self.ax.scatter([center[0]], [center[1]], [center[2]], 
+                                  c=color, s=100, marker='o', alpha=1.0)
+                    
+                    # Draw OBB edges (simplified)
+                    self._draw_obb_edges(corners, color)
+            
+            # Set equal aspect ratio and limits
+            self._set_equal_aspect()
+            
+            if len(self.points_data) > 0:
+                self.ax.legend()
+            
+            plt.draw()
+            plt.pause(0.001)  # Small pause to update the plot
+            
+        except Exception as e:
+            print(f"Error in 3D visualization: {e}")
+    
+    def _draw_obb_edges(self, corners, color):
+        """Draw OBB edges"""
+        # Define edges of a box (cube)
+        edges = [
+            [0, 1], [1, 3], [3, 2], [2, 0],  # bottom face
+            [4, 5], [5, 7], [7, 6], [6, 4],  # top face
+            [0, 4], [1, 5], [2, 6], [3, 7]   # vertical edges
+        ]
+        
+        for edge in edges:
+            start, end = edge
+            self.ax.plot3D(*zip(corners[start], corners[end]), color=color, alpha=0.7, linewidth=1)
+    
+    def _set_equal_aspect(self):
+        """Set equal aspect ratio for all axes"""
+        if len(self.points_data) == 0:
+            return
+            
+        all_points = []
+        for pts in self.points_data:
+            if pts is not None and len(pts) > 0:
+                all_points.extend(pts)
+        
+        if len(all_points) == 0:
+            return
+            
+        all_points = np.array(all_points)
+        max_range = np.array([all_points[:,0].max()-all_points[:,0].min(),
+                             all_points[:,1].max()-all_points[:,1].min(),
+                             all_points[:,2].max()-all_points[:,2].min()]).max() / 2.0
+        
+        mid_x = (all_points[:,0].max()+all_points[:,0].min()) * 0.5
+        mid_y = (all_points[:,1].max()+all_points[:,1].min()) * 0.5
+        mid_z = (all_points[:,2].max()+all_points[:,2].min()) * 0.5
+        
+        self.ax.set_xlim(mid_x - max_range, mid_x + max_range)
+        self.ax.set_ylim(mid_y - max_range, mid_y + max_range)
+        self.ax.set_zlim(mid_z - max_range, mid_z + max_range)
+    
+    def close(self):
+        """Close the 3D plot"""
+        if self.fig is not None:
+            plt.close(self.fig)
+        self.is_active = False
+
+
+# --------------------
 # Simple drawing
 # --------------------
 def draw_point_cloud(img, intr, pts3d, color=(0, 255, 255), size=2, stride=5):
@@ -472,6 +611,13 @@ def main():
 
     # Runtime toggles
     show_point_cloud = SHOW_POINT_CLOUD
+    show_3d_plot = SHOW_3D_PLOT
+    
+    # Initialize 3D visualizer
+    visualizer_3d = None
+    if show_3d_plot:
+        visualizer_3d = PointCloud3DVisualizer(max_points=PLOT_MAX_POINTS)
+        visualizer_3d.initialize()
     
     t0 = time.time(); n=0; fps=None
 
@@ -493,6 +639,10 @@ def main():
             clses = r.boxes.cls.cpu().numpy().astype(int) if r.boxes is not None else np.zeros((0,), int)
             confs = r.boxes.conf.cpu().numpy() if r.boxes is not None else np.zeros((0,))
             masks = r.masks.data.cpu().numpy() if r.masks is not None else None
+
+            # Collect 3D data for matplotlib visualization
+            points_3d_list = []
+            obb_3d_list = []
 
             for i in range(len(boxes)):
                 cls_name = names.get(int(clses[i]), str(int(clses[i])))
@@ -569,6 +719,11 @@ def main():
                     cv2.rectangle(overlay, (cx, y2-th2-6), (cx+tw2+6, y2), (70,180,255), -1)
                     cv2.putText(overlay, yaw_label, (cx+3, y2-4), FONT, 0.7, (0,0,0), 2, cv2.LINE_AA)
 
+                # Collect data for 3D visualization
+                if show_3d_plot and visualizer_3d is not None:
+                    points_3d_list.append(pts3d)
+                    obb_3d_list.append((corners3d, center3d))
+
             # FPS and controls info
             n += 1
             if n >= 10:
@@ -576,8 +731,13 @@ def main():
             if fps is not None:
                 cv2.putText(overlay, f"FPS: {fps:.1f}", (12, 28), FONT, 0.8, (50,50,255), 2, cv2.LINE_AA)
             
+            # Update 3D visualization
+            if show_3d_plot and visualizer_3d is not None and UPDATE_3D_PLOT:
+                visualizer_3d.update_data(points_3d_list, obb_3d_list)
+                visualizer_3d.render()
+
             # Display controls
-            controls_text = f"Point Cloud: {'ON' if show_point_cloud else 'OFF'} (P to toggle) | Q to quit"
+            controls_text = f"Point Cloud: {'ON' if show_point_cloud else 'OFF'} (P) | 3D Plot: {'ON' if show_3d_plot else 'OFF'} (M) | Q to quit"
             cv2.putText(overlay, controls_text, (12, overlay.shape[0] - 12), FONT, 0.5, (255,255,255), 1, cv2.LINE_AA)
 
             cv2.imshow("RealSense YOLO (Core)", overlay)
@@ -589,8 +749,19 @@ def main():
             elif key == ord('p') or key == ord('P'):
                 show_point_cloud = not show_point_cloud
                 print(f"Point cloud visualization: {'ON' if show_point_cloud else 'OFF'}")
+            elif key == ord('m') or key == ord('M'):
+                show_3d_plot = not show_3d_plot
+                if show_3d_plot and visualizer_3d is None:
+                    visualizer_3d = PointCloud3DVisualizer(max_points=PLOT_MAX_POINTS)
+                    visualizer_3d.initialize()
+                elif not show_3d_plot and visualizer_3d is not None:
+                    visualizer_3d.close()
+                    visualizer_3d = None
+                print(f"3D matplotlib visualization: {'ON' if show_3d_plot else 'OFF'}")
     finally:
         pipe.stop()
+        if visualizer_3d is not None:
+            visualizer_3d.close()
         try: cv2.destroyAllWindows()
         except: pass
 
