@@ -22,6 +22,11 @@ FONT = cv2.FONT_HERSHEY_SIMPLEX
 USE_PLANE_FILLING = True  # Enable plane-based depth filling for planar objects
 PLANE_FILL_TAU = 0.01     # RANSAC threshold for plane fitting
 
+# Point cloud visualization options
+SHOW_POINT_CLOUD = True   # Show 3D points on the image
+POINT_CLOUD_STRIDE = 5    # Skip every N points for visualization (to avoid clutter)
+POINT_CLOUD_SIZE = 2      # Size of point markers
+
 
 # Base←Cam extrinsic (example; replace with calibrated values)
 RX_DEG, RY_DEG, RZ_DEG = -180.0, 0.0, -80.0
@@ -365,6 +370,44 @@ class PoseStabilizer:
 # --------------------
 # Simple drawing
 # --------------------
+def draw_point_cloud(img, intr, pts3d, color=(0, 255, 255), size=2, stride=5):
+    """
+    포인트 클라우드를 이미지에 시각화
+    
+    Args:
+        img: 대상 이미지
+        intr: 카메라 내부 파라미터
+        pts3d: 3D 포인트 배열 (N x 3)
+        color: 점 색상 (BGR)
+        size: 점 크기
+        stride: 표시할 점 간격 (성능을 위해 일부만 표시)
+    """
+    if pts3d is None or len(pts3d) == 0:
+        return
+    
+    # 성능을 위해 일부 점만 선택
+    pts_subset = pts3d[::stride]
+    
+    # 3D 점을 2D로 투영
+    uv, valid = project_points_intr(intr, pts_subset)
+    H, W = img.shape[:2]
+    
+    # 유효한 점들만 그리기
+    for i in range(len(pts_subset)):
+        if not valid[i]:
+            continue
+        
+        x, y = int(round(uv[i, 0])), int(round(uv[i, 1]))
+        if 0 <= x < W and 0 <= y < H:
+            # 깊이에 따른 색상 변화 (선택사항)
+            z = pts_subset[i, 2]
+            # 거리에 따라 색상 조절 (가까우면 밝게, 멀면 어둡게)
+            intensity = max(0.3, min(1.0, 2.0 / max(z, 0.1)))
+            point_color = tuple(int(c * intensity) for c in color)
+            
+            cv2.circle(img, (x, y), size, point_color, -1)
+
+
 def draw_obb3d_on_image(img, intr, corners3d, color=(200,50,200), th=2):
     uv, valid = project_points_intr(intr, corners3d)
     H, W = img.shape[:2]
@@ -422,6 +465,9 @@ def main():
     pca_filter = PCAPoseFilter(ratio_thresh=1.5, keep_last_when_unstable=True)
     stabilizer = PoseStabilizer(alpha_R=0.25, alpha_t=0.3, use_plane_lock=True)
 
+    # Runtime toggles
+    show_point_cloud = SHOW_POINT_CLOUD
+    
     t0 = time.time(); n=0; fps=None
 
     try:
@@ -488,6 +534,13 @@ def main():
                 # draw 3D box and axes
                 draw_obb3d_on_image(overlay, intr, corners3d)
                 draw_axes3d(overlay, intr, center3d, axes3, lens3)
+                
+                # draw point cloud if enabled
+                if show_point_cloud:
+                    draw_point_cloud(overlay, intr, pts3d, 
+                                    color=(0, 255, 255),  # Yellow points
+                                    size=POINT_CLOUD_SIZE, 
+                                    stride=POINT_CLOUD_STRIDE)
 
                 # label with class, conf, Z, stability info, and plane filling status
                 uv_c, ok = project_points_intr(intr, center3d.reshape(1,3))
@@ -511,16 +564,26 @@ def main():
                     cv2.rectangle(overlay, (cx, y2-th2-6), (cx+tw2+6, y2), (70,180,255), -1)
                     cv2.putText(overlay, yaw_label, (cx+3, y2-4), FONT, 0.7, (0,0,0), 2, cv2.LINE_AA)
 
-            # FPS
+            # FPS and controls info
             n += 1
             if n >= 10:
                 now = time.time(); fps = n / (now - t0); t0 = now; n = 0
             if fps is not None:
                 cv2.putText(overlay, f"FPS: {fps:.1f}", (12, 28), FONT, 0.8, (50,50,255), 2, cv2.LINE_AA)
+            
+            # Display controls
+            controls_text = f"Point Cloud: {'ON' if show_point_cloud else 'OFF'} (P to toggle) | Q to quit"
+            cv2.putText(overlay, controls_text, (12, overlay.shape[0] - 12), FONT, 0.5, (255,255,255), 1, cv2.LINE_AA)
 
             cv2.imshow("RealSense YOLO (Core)", overlay)
-            if (cv2.waitKey(1) & 0xFF) == ord('q'):
+            
+            # Handle keyboard input
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord('q'):
                 break
+            elif key == ord('p') or key == ord('P'):
+                show_point_cloud = not show_point_cloud
+                print(f"Point cloud visualization: {'ON' if show_point_cloud else 'OFF'}")
     finally:
         pipe.stop()
         try: cv2.destroyAllWindows()
