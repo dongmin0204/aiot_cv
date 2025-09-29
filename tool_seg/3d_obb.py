@@ -117,6 +117,11 @@ def fill_by_plane(depth_u16, mask, depth_scale, intr, x_map, y_map, pts3d, tau=0
         return depth_u16
     
     H, W = depth_u16.shape
+    
+    # Mask size guard - resize mask if dimensions don't match
+    if mask.shape != (H, W):
+        mask = cv2.resize(mask, (W, H), interpolation=cv2.INTER_NEAREST)
+    
     # 카메라 좌표: X = x_map*Z, Y = y_map*Z
     # 평면 방정식: n·(Z*[x_map, y_map, 1]) + d = 0
     # => Z = -d / (n·[x_map, y_map, 1])
