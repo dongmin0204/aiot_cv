@@ -1,7 +1,7 @@
 # aiot_cv: 로봇팔 공구 파지를 위한 3D 자세추정
 
 AIoT 창의적 종합설계 경진대회(2025) 협동 로봇팔 프로젝트의 컴퓨터 비전 파트입니다.
-음성 명령으로 지목한 공구를 로봇팔이 인식해 건네주는 시스템에서, 저는 검출 이후의 3D 자세추정 파이프라인을 담당했습니다.
+음성 명령으로 지목한 공구를 로봇팔이 인식해 건네주는 시스템에서, 검출 이후의 3D 자세추정 파이프라인을 담당
 
 
 > 역할: 3D PCA 기반 자세추정, 자세 안정화, FoundationPose 전환 탐색
@@ -36,7 +36,7 @@ AIoT 창의적 종합설계 경진대회(2025) 협동 로봇팔 프로젝트의 
 ### 참고한 것
 
 - PCA 기반 OBB: 공분산 고유분해로 주축을 구해 경계 박스를 만드는 표준 방식.
-- Power iteration: 전체 고유분해 없이 최대 고유벡터만 반복곱으로 근사하는 방법. ([velog: EVD 없이 Eigenvalue 찾기](https://velog.io/@cleansky/EVD-%EC%97%86%EC%9D%B4-Eigenvalue-%EC%B0%BE%EA%B8%B0-PowerIteration-Power-Method))
+- Power iteration: 전체 고유분해 없이 최대 고유벡터만 반복곱으로 근사하는 방법. ([velog: EVD 없이 Eigenvalue 찾기](https://velog.io/@cleansky/EVD-%EC%97%86%EC%9D%B4-Eigenvalue-%EC%B0%BE%EA%B8%B0-Power-Iteration-Power-Method))
 - 고유공간 섭동 이론(Davis-Kahan): 고유값이 붙어 있을수록 고유벡터가 노이즈에 불안정하다는 배경.
 - FoundationPose (CVPR 2024): CAD 모델 기반 6-DoF 자세추정 및 트래킹. ([논문/코드](https://github.com/NVlabs/FoundationPose))
 - RealSense 깊이 처리: 공식 SDK의 spatial, temporal, hole filling 필터.
