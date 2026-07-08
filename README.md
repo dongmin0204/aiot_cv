@@ -6,11 +6,23 @@ AIoT 창의적 종합설계 경진대회(2025) 협동 로봇팔 프로젝트의 
 
 > 역할: 3D PCA 기반 자세추정, 자세 안정화, FoundationPose 전환 탐색
 
+<p align="center">
+  <img src="docs/figures/robot_arm.png" width="320" alt="robot arm platform">
+</p>
+
+<p align="center"><sub>프로젝트에 사용한 협업 로봇팔 플랫폼</sub></p>
+
 ## 파이프라인
 
 ![pipeline](docs/diagrams/pipeline.png)
 
 검출 마스크를 입력으로 받아 3D 자세를 출력하는 흐름입니다.
+
+## 시스템에서의 위치
+
+전체 시스템은 음성 명령(LLM), 지각(CV), 로봇 제어의 세 부분으로 나뉩니다. 제가 맡은 CV 지각 노드가 매 프레임 자세를 계산해 제어단으로 넘깁니다.
+
+![system sequence](docs/diagrams/system_sequence.png)
 
 ## 문제 상황
 
@@ -59,6 +71,20 @@ AIoT 창의적 종합설계 경진대회(2025) 협동 로봇팔 프로젝트의 
 - 자세 안정화(부호정렬)는 정확도를 올리지 않습니다. 화면상 축 뒤집힘을 없애는 시간 연속성만 제공합니다.
 - 프레임 간 스무딩만 강하게 걸면 지연(lag)이 생겨 급격한 회전에서 오차가 커집니다.
 
+아래는 실험 결과 차트입니다. 모두 위 스크립트가 생성한 CSV에서 나온 것이며, 생성 코드는 `docs/figures/make_figures.py`에 있습니다.
+
+![outlier volume](docs/figures/fig_outlier_volume.png)
+
+이상치가 늘어도 트리밍이 경계 박스 부피 팽창을 억제합니다. 이상치 10퍼센트에서 약 50배 팽창이 약 1.5배로 줄어듭니다. (`experiments/exp1_outlier_volume.csv`)
+
+![ground truth accuracy](docs/figures/fig_gt_accuracy.png)
+
+정답 자세 대비 주축 오차입니다. 기존 안정화(회색)는 급격한 회전 구간에서 크게 뒤처져, 낮은 흔들림이 정확도가 아니라 지연이었음을 보여줍니다. raw와 제 방식은 거의 겹쳐, 부호정렬이 정확도를 바꾸지 않음을 확인합니다. (`experiments/gt_per_frame.csv`)
+
+![flip vs symmetry](docs/figures/fig_flip_symmetry.png)
+
+축 뒤집힘 횟수는 물체 기하가 결정합니다. 원통이나 정사각 단면(빨강)이 심하게 뒤집히고, 길쭉한 공구(파랑)는 적습니다. 안정화를 적용하면 모든 공구에서 0으로 떨어집니다. (`experiments/bench_summary.csv`)
+
 ## FoundationPose 전환과 CAD 스캔
 
 PCA 방식이 세그멘테이션과 배경 오염에 취약한 것을 확인하고, 모델 기반인 FoundationPose로 전환을 탐색했습니다. FoundationPose는 가정한 자세로 CAD 모델을 렌더링해 관측과 비교하는 방식이라, 배경 이상치가 모델과 맞지 않으면 자동으로 무시됩니다. 실제로 실시간 자세 트래킹까지 동작시켰습니다.
@@ -87,7 +113,8 @@ aiot_cv/
 │   └── *.csv                      # 실험 결과
 └── docs/
     ├── foundationpose_analysis.md # FoundationPose 파이프라인 분석
-    └── diagrams/                  # 파이프라인 다이어그램
+    ├── figures/                   # 실험 결과 차트 + 생성 스크립트(make_figures.py)
+    └── diagrams/                  # 파이프라인, 시스템 시퀀스 다이어그램
 ```
 
 ## 실행
