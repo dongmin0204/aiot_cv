@@ -1,0 +1,4 @@
+stage,metric,before,after,verdict
+1_pointcloud_outlier_trim,OBB부피팽창@10%outlier,50.11x,1.51x,진짜 개선(방어가능)
+2_pca_obb_axis,주축오차(GT)@5%outlier,1.01deg,0.19deg,raw이미정확+트림보강
+3_sign_stabilize,flip / 주축정확도,11flip / 1.014deg,0flip / 1.207deg,"부호연속성O, power_iter로 정확도 오히려 마이너스"

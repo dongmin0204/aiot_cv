@@ -1,0 +1,14 @@
+flowchart LR
+    IN["검출 마스크<br/>(팀 YOLO seg)"] --> A
+    subgraph MINE["내 담당 3D 자세추정 파이프라인"]
+        A["마스크 to 3D 점군<br/>(RealSense depth 역투영)"] --> B["RANSAC 평면 hole fill<br/>(금속면 depth 결측 보완)"]
+        B --> C["PCA OBB<br/>(주축, 중심, 크기)"]
+        C --> D["RealtimePCASmoother<br/>(고유값 게이트, Power iter, 부호정렬)"]
+        D --> E["outlier 트리밍<br/>(복셀 밀도)"]
+        E --> F["6-DoF pose<br/>(center + R)"]
+    end
+    F --> OUT["파지 좌표<br/>(팀 제어단)"]
+    C -. "PCA가 배경 오염에 취약" .-> G["FoundationPose (대안)<br/>모델 기반, CAD 스캔 필요<br/>실시간 트래킹 성공"]
+    style MINE fill:#fff7e6,stroke:#d48806
+    style D fill:#ffd666,stroke:#d48806
+    style G fill:#e6f4ff,stroke:#1677ff
