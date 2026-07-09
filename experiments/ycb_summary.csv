@@ -1,0 +1,5 @@
+tool,raw_flip,pose_flip,rt_flip,raw_symerr,pose_symerr,rt_symerr
+hammer,3,0,0,0.62,4.853,0.62
+power_drill,0,0,0,1.504,8.93,1.504
+scissors,3,0,0,0.733,4.239,0.733
+medium_clamp,4,0,0,6.798,12.129,12.856

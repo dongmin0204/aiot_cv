@@ -85,3 +85,4 @@ checkpoints/
 !train_results/**/results.csv
 !tool_seg/data.yaml
 !README.md
+experiments/ycb_data/

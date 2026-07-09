@@ -85,6 +85,14 @@ AIoT 창의적 종합설계 경진대회(2025) 협동 로봇팔 프로젝트의 
 
 축 뒤집힘 횟수는 물체 기하가 결정합니다. 원통이나 정사각 단면(빨강)이 심하게 뒤집히고, 길쭉한 공구(파랑)는 적습니다. 안정화를 적용하면 모든 공구에서 0으로 떨어집니다. (`experiments/bench_summary.csv`)
 
+### 실제 YCB 공구 지오메트리 검증
+
+합성 도형뿐 아니라 실제 공구 메시(YCB: hammer, power_drill, scissors, medium_clamp)를 표면 샘플링해 통제된 회전으로도 검증했습니다. **실제 공구에서도 raw PCA의 축 뒤집힘을 제거합니다(합계 raw 10회 → 0회).** 다만 정확도는 올리지 않으며, 퇴화 물체(medium_clamp)에서는 오히려 나빠집니다(축오차 6.8도 → 12.9도). 합성 결과와 같은 한계입니다. 자세 안정화는 시간축 문제라 물체가 움직이는 시퀀스에서만 의미가 있습니다. (`experiments/ycb_realdata_benchmark.py`, `experiments/ycb_summary.csv`)
+
+![ycb flip](docs/figures/fig_ycb_flip.png)
+
+실제 YCB 공구 지오메트리에서 방식별 축 뒤집힘. raw만 뒤집히고 안정화 방식은 0.
+
 ## FoundationPose 전환과 CAD 스캔
 
 PCA 방식이 세그멘테이션과 배경 오염에 취약한 것을 확인하고, 모델 기반인 FoundationPose로 전환을 탐색했습니다. FoundationPose는 가정한 자세로 CAD 모델을 렌더링해 관측과 비교하는 방식이라, 배경 이상치가 모델과 맞지 않으면 자동으로 무시됩니다. 실제로 실시간 자세 트래킹까지 동작시켰습니다.
